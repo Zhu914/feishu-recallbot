@@ -1,0 +1,17 @@
+{
+  "name": "feishu-bot-framework",
+  "version": "0.1.0",
+  "description": "Reusable Feishu WebSocket bot framework with Claude Code session support",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "check": "node --check src/index.js && node --check src/feishu.js && node --check src/scheduler.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^1.0.0",
+    "@larksuiteoapi/node-sdk": "^1.63.0",
+    "dotenv": "^16.4.0",
+    "node-cron": "^4.2.1"
+  }
+}

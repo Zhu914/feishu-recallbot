@@ -1,0 +1,16 @@
+node_modules/
+.env
+.env.*
+logs/
+outputs/*
+!outputs/.gitkeep
+minutes/
+temp/
+data/
+web/
+.claude/
+.feishu-bot.pid
+.DS_Store
+__pycache__/
+*.pyc
+.vscode/

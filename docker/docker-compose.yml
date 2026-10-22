@@ -1,0 +1,17 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.app
+    env_file:
+      - ../.env
+    environment:
+      DEFAULT_CWD: /app
+    volumes:
+      - app-outputs:/app/outputs
+      - app-logs:/app/logs
+    restart: unless-stopped
+
+volumes:
+  app-outputs:
+  app-logs:

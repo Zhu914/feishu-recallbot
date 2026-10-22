@@ -1,0 +1,14 @@
+.git
+node_modules
+outputs
+logs
+minutes
+temp
+data
+web
+.env
+.env.*
+.feishu-bot.pid
+**/__pycache__
+**/*.pyc
+.DS_Store
