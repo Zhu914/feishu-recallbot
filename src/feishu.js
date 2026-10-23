@@ -237,6 +237,78 @@ export async function sendDirectMessage(userId, text) {
 }
 
 /**
+ * 拉取消息里的 @ 用户，优先使用事件 mentions 字段，post 内容作为兜底。
+ */
+export function extractMessageMentions(rawMsg) {
+  const byOpenId = new Map();
+
+  function addMention(openId, name = '', key = '') {
+    if (!openId || !openId.startsWith('ou_')) return;
+    const existing = byOpenId.get(openId) || { openId, name, key };
+    if (!existing.name && name) existing.name = name;
+    if (!existing.key && key) existing.key = key;
+    byOpenId.set(openId, existing);
+  }
+
+  for (const mention of rawMsg?.mentions || []) {
+    addMention(mention?.id?.open_id, mention?.name, mention?.key);
+  }
+
+  try {
+    const content = JSON.parse(rawMsg?.content || '{}');
+    if (rawMsg?.message_type === 'post') {
+      const locale = content.zh_cn || content.en_us || content.ja_jp || content;
+      for (const paragraph of locale?.content || []) {
+        if (!Array.isArray(paragraph)) continue;
+        for (const element of paragraph) {
+          if (element?.tag === 'at' && element.user_id) {
+            addMention(element.user_id, element.user_name || '');
+          }
+        }
+      }
+    }
+  } catch {}
+
+  return [...byOpenId.values()];
+}
+
+/**
+ * 添加群成员。openIds 最多 50 个。
+ */
+export async function addChatMembers(chatId, openIds) {
+  if (!chatId?.startsWith('oc_')) throw new Error('invalid chat_id');
+  if (!Array.isArray(openIds) || openIds.length === 0 || openIds.length > 50) {
+    throw new Error('用户数量必须在 1-50 之间');
+  }
+
+  const resp = await getClient().im.chatMembers.create({
+    path: { chat_id: chatId },
+    params: { member_id_type: 'open_id' },
+    data: { id_list: openIds },
+  });
+  if (resp?.code && resp.code !== 0) throw new Error(resp.msg || `Feishu error ${resp.code}`);
+  return resp?.data || {};
+}
+
+/**
+ * 移除群成员。openIds 最多 50 个。
+ */
+export async function removeChatMembers(chatId, openIds) {
+  if (!chatId?.startsWith('oc_')) throw new Error('invalid chat_id');
+  if (!Array.isArray(openIds) || openIds.length === 0 || openIds.length > 50) {
+    throw new Error('用户数量必须在 1-50 之间');
+  }
+
+  const resp = await getClient().im.chatMembers.delete({
+    path: { chat_id: chatId },
+    params: { member_id_type: 'open_id' },
+    data: { id_list: openIds },
+  });
+  if (resp?.code && resp.code !== 0) throw new Error(resp.msg || `Feishu error ${resp.code}`);
+  return resp?.data || {};
+}
+
+/**
  * 提取事件中的消息文本
  */
 function extractPostText(content) {

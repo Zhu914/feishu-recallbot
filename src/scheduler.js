@@ -4,13 +4,13 @@
 import cron from 'node-cron';
 import { readFile, writeFile } from 'fs/promises';
 
-const TASKS_FILE = new URL('../tasks.json', import.meta.url);
+const TASKS_FILE = process.env.TASKS_FILE || new URL('../tasks.json', import.meta.url);
 
 let activeTasks = []; // { name, task: ScheduledTask }
-let deps = { runClaudeQuery: null, sendMessage: null };
+let deps = { runAgentQuery: null, sendMessage: null };
 
-export async function startScheduler({ runClaudeQuery, sendMessage }) {
-  deps.runClaudeQuery = runClaudeQuery;
+export async function startScheduler({ runAgentQuery, sendMessage }) {
+  deps.runAgentQuery = runAgentQuery;
   deps.sendMessage = sendMessage;
   await reloadScheduler();
 }
@@ -51,7 +51,7 @@ export async function reloadScheduler() {
     const scheduled = cron.schedule(task.cron, async () => {
       console.log(`[scheduler] firing: ${task.name}`);
       try {
-        const result = await deps.runClaudeQuery(task.prompt);
+        const result = await deps.runAgentQuery(task.prompt);
         if (task.sendTo && result) {
           await deps.sendMessage(task.sendTo, result);
         }
@@ -67,7 +67,7 @@ export async function reloadScheduler() {
   console.log(`[scheduler] ${enabled.length}/${tasks.length} tasks running`);
 }
 
-// CRUD helpers — Claude 调用这些操作 tasks.json，然后触发 reload
+// CRUD helpers — Agent 调用这些操作 tasks.json，然后触发 reload
 
 export async function listTasks() {
   const raw = await readFile(TASKS_FILE, 'utf-8');

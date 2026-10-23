@@ -1,3 +1,5 @@
+name: feishu-bot
+
 services:
   app:
     build:
@@ -7,11 +9,19 @@ services:
       - ../.env
     environment:
       DEFAULT_CWD: /app
+      DATA_DIR: /data
+      CONTACTS_FILE: /data/contacts.md
+      TASKS_FILE: /data/tasks.json
+      CODEX_HOME: /data/codex-home
     volumes:
       - app-outputs:/app/outputs
       - app-logs:/app/logs
+      - bot-home:/root/.feishu-bot
+      - bot-data:/data
     restart: unless-stopped
 
 volumes:
   app-outputs:
   app-logs:
+  bot-home:
+  bot-data:

@@ -1,9 +1,9 @@
-// Feishu Bot Framework — Feishu WebSocket events × Claude Code sessions
+// Feishu Bot Framework — Feishu WebSocket events × Codex sessions
 
 import 'dotenv/config';
 import lark from '@larksuiteoapi/node-sdk';
-import { query } from '@anthropic-ai/claude-code';
-import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile } from './feishu.js';
+import { runCodexQuery } from './codex.js';
+import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers } from './feishu.js';
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
 
@@ -81,8 +81,8 @@ process.on('SIGTERM', () => process.exit(143));
 import { readFile, writeFile, mkdir, readdir, unlink, appendFile, rm, stat } from 'fs/promises';
 import { join } from 'path';
 import { homedir, tmpdir } from 'os';
-const CONTACTS_FILE = new URL('../session/knowledge/contacts.md', import.meta.url);
-// 隔离到项目外，避免 Claude Code session 污染 VSCode
+const CONTACTS_FILE = process.env.CONTACTS_FILE || new URL('../session/knowledge/contacts.md', import.meta.url);
+// 隔离到项目外，避免 Codex session 污染 VSCode
 const BOT_HOME = join(homedir(), '.feishu-bot');
 const WORKSPACE_ROOT = join(BOT_HOME, 'workspace');
 const TEMP_FILE_DIR = join(tmpdir(), 'feishu-bot-files');
@@ -142,16 +142,16 @@ async function removeContact(openId) {
   return true;
 }
 
-// ---- 知识库预加载（注入 prompt，不靠 Claude 自己读） ----
+// ---- 知识库预加载（注入 prompt，不靠 Codex 自己读） ----
 import { watchFile, unlinkSync } from 'fs';
 const STYLE_FILE_KB = new URL('../session/knowledge/style.md', import.meta.url);
-const STYLE_FILE = new URL('../session/CLAUDE.md', import.meta.url);
+const AGENTS_FILE = new URL('../AGENTS.md', import.meta.url);
 
 let knowledgeContext = '';
 
 async function loadKnowledge() {
   const parts = [];
-  for (const [label, file] of [['身份与规则', STYLE_FILE], ['回复风格', STYLE_FILE_KB], ['访问控制', CONTACTS_FILE]]) {
+  for (const [label, file] of [['身份与规则', AGENTS_FILE], ['回复风格', STYLE_FILE_KB], ['访问控制', CONTACTS_FILE]]) {
     try {
       const content = await readFile(file, 'utf-8');
       parts.push(`## ${label}\n${content}`);
@@ -367,35 +367,60 @@ const SESSIONS_FILE = join(BOT_HOME, 'sessions.json');
 
 const SESSION_MAX_AGE_MS = 3 * 86400000; // 3 天
 
+const SESSIONS_AGENT = 'codex';
+
 async function saveSessions() {
   const data = [];
   for (const [rootId, s] of sessions) {
-    data.push({ rootId, sessionId: s.sessionId, openId: s.openId || '', title: s.title, cwd: s.cwd, updatedAt: Date.now() });
+    data.push({
+      rootId,
+      sessionId: s.sessionId,
+      agent: SESSIONS_AGENT,
+      openId: s.openId || '',
+      title: s.title,
+      cwd: s.cwd,
+      updatedAt: Date.now(),
+    });
   }
   await mkdir(BOT_HOME, { recursive: true }).catch(() => {});
-  await writeFile(SESSIONS_FILE, JSON.stringify(data, null, 2)).catch(() => {});
+  await writeFile(SESSIONS_FILE, JSON.stringify({ version: 2, agent: SESSIONS_AGENT, sessions: data }, null, 2)).catch(() => {});
 }
 
 async function loadSessions() {
   try {
     const raw = await readFile(SESSIONS_FILE, 'utf-8');
-    const data = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Version 1 was an array of Claude Code sessions. Those IDs cannot be
+    // resumed by Codex, so deliberately start new Codex threads instead.
+    const data = Array.isArray(parsed) ? [] : (parsed.sessions || []);
+    const parsedAgent = Array.isArray(parsed) ? '' : parsed.agent;
     const now = Date.now();
     let expired = 0;
-    for (const entry of data) {
-      if (entry.updatedAt && now - entry.updatedAt > SESSION_MAX_AGE_MS) { expired++; continue; }
-      const state = {
-        sessionId: entry.sessionId,
-        openId: entry.openId,
-        cwd: entry.cwd || join(WORKSPACE_ROOT, entry.openId || 'anonymous'),
-        status: 'idle',
-        title: entry.title || '',
-        abortController: null,
-      };
-      sessions.set(entry.rootId, state);
+    let incompatible = 0;
+
+    if (!parsedAgent || parsedAgent !== SESSIONS_AGENT) {
+      incompatible = data.length;
+    } else {
+      for (const entry of data) {
+        if (entry.updatedAt && now - entry.updatedAt > SESSION_MAX_AGE_MS) {
+          expired++;
+          continue;
+        }
+        const state = {
+          sessionId: entry.sessionId,
+          openId: entry.openId,
+          cwd: entry.cwd || join(WORKSPACE_ROOT, entry.openId || 'anonymous'),
+          status: 'idle',
+          title: entry.title || '',
+          abortController: null,
+          attachments: [],
+        };
+        sessions.set(entry.rootId, state);
+      }
     }
-    log('ok', 'session', `restored ${data.length - expired} session(s), expired ${expired}`);
-    if (expired > 0) await saveSessions();
+
+    log('ok', 'session', `restored ${sessions.size} session(s), expired ${expired}, incompatible ${incompatible}`);
+    if (expired > 0 || incompatible > 0) await saveSessions();
   } catch {
     log('info', 'session', 'no saved sessions, starting fresh');
   }
@@ -405,26 +430,29 @@ function getSession(rootId) {
   return sessions.get(rootId);
 }
 
-function createSession(rootId, openId = '') {
+async function createSession(rootId, openId = '') {
   const userDir = openId || 'anonymous';
   const userWorkspace = join(WORKSPACE_ROOT, userDir);
-  mkdir(userWorkspace, { recursive: true }).then(async () => {
-    // symlink 项目配置到 workspace，让 Claude Code SDK 能发现 .claude/、skills/、knowledge/
-    const projectRoot = new URL('..', import.meta.url).pathname;
-    const symlinks = [['.claude', '.claude'], ['skills', 'skills'], ['session/knowledge', 'knowledge']];
-    for (const [src, linkName] of symlinks) {
-      const link = join(userWorkspace, linkName);
-      const target = join(projectRoot, src);
-      try {
-        const st = await (await import('fs/promises')).lstat(link).catch(() => null);
-        if (!st) {
-          const { symlink } = await import('fs/promises');
-          await symlink(target, link, 'junction');
-          log('ok', 'symlink', `${linkName} → ${target}`);
-        }
-      } catch (e) { log('warn', 'symlink', `${linkName}: ${e.message}`); }
+  await mkdir(userWorkspace, { recursive: true });
+
+  // Link shared prompt resources into the workspace before the first Codex
+  // process starts; otherwise spawn(cwd) can race with directory creation.
+  const projectRoot = new URL('..', import.meta.url).pathname;
+  const symlinks = [['skills', 'skills'], ['session/knowledge', 'knowledge'], ['AGENTS.md', 'AGENTS.md']];
+  for (const [src, linkName] of symlinks) {
+    const link = join(userWorkspace, linkName);
+    const target = join(projectRoot, src);
+    try {
+      const st = await (await import('fs/promises')).lstat(link).catch(() => null);
+      if (!st) {
+        const { symlink } = await import('fs/promises');
+        await symlink(target, link, 'junction');
+        log('ok', 'symlink', `${linkName} → ${target}`);
+      }
+    } catch (e) {
+      log('warn', 'symlink', `${linkName}: ${e.message}`);
     }
-  }).catch(() => {});
+  }
 
   const state = { sessionId: null, openId, cwd: userWorkspace, status: 'idle', title: '', abortController: null, attachments: [] };
   sessions.set(rootId, state);
@@ -439,14 +467,70 @@ function parseCommand(text) {
   return { cmd: parts[0].toLowerCase(), args: parts.slice(1).join(' ') };
 }
 
-// adminOnly// adminOnly 包裹器：非管理员执行时返回提示
+// 群里常见写法是 @机器人 /command，这里只移除命令前方的 mention 占位符。
+function normalizeCommandText(text, mentions = []) {
+  let normalized = text.trim();
+  for (const mention of mentions) {
+    const tokens = [mention.key, mention.openId ? `@${mention.openId}` : '', mention.name ? `@${mention.name}` : '']
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+    for (const token of tokens) {
+      if (normalized.startsWith(token)) {
+        normalized = normalized.slice(token.length).trim();
+        return normalized;
+      }
+    }
+  }
+  return normalized;
+}
+
+function resolveMemberTargets(args, mentions = []) {
+  if (!args.trim()) return [];
+
+  const byOpenId = new Map();
+  for (const id of args.match(/ou_[A-Za-z0-9]+/g) || []) {
+    byOpenId.set(id, { openId: id, name: id });
+  }
+
+  for (const mention of mentions) {
+    const tokens = [mention.key, mention.openId ? `@${mention.openId}` : '', mention.name ? `@${mention.name}` : '']
+      .filter(Boolean);
+    if (tokens.some(token => args.includes(token))) {
+      byOpenId.set(mention.openId, mention);
+    }
+  }
+
+  return [...byOpenId.values()];
+}
+
+function memberActionSummary(targets, result, action) {
+  const names = targets.map(target => target.name && target.name !== target.openId ? `${target.name} (${target.openId})` : target.openId);
+  const invalid = result?.invalid_id_list || [];
+  const notExisted = result?.not_existed_id_list || [];
+  const pending = result?.pending_approval_id_list || [];
+
+  if (invalid.length || notExisted.length) {
+    return [
+      `部分用户未能${action}。`,
+      invalid.length ? `无效用户: ${invalid.join(', ')}` : '',
+      notExisted.length ? `不存在用户: ${notExisted.join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  const pendingNote = pending.length
+    ? `\n以下用户需等待审批: ${pending.join(', ')}`
+    : '';
+  return `已提交${action}: ${names.join(', ')}${pendingNote}`;
+}
+
+// adminOnly 包裹器：非管理员执行时返回提示
 function adminOnly(handler) {
-  return async (args, msgId, state, openId) => {
+  return async (args, msgId, state, openId, context = {}) => {
     if (!isAdmin(openId)) {
       await replyMessage(msgId, '⛔ 仅管理员可执行此命令');
       return true;
     }
-    return handler(args, msgId, state, openId);
+    return handler(args, msgId, state, openId, context);
   };
 }
 
@@ -482,12 +566,61 @@ const adminCommands = {
     await replyMessage(msgId, `联系人 (${lines.length}):\n${lines.join('\n')}`);
     return true;
   },
+  'add-member': async (args, msgId, _state, _openId, { chatId, chatType, mentions } = {}) => {
+    if (chatType !== 'group' || !chatId) {
+      await replyMessage(msgId, '只能在群聊中使用 /add-member');
+      return true;
+    }
+    const targets = resolveMemberTargets(args, mentions);
+    if (targets.length === 0) {
+      await replyMessage(msgId, '用法: /add-member @用户\n也可以使用: /add-member <open_id>');
+      return true;
+    }
+
+    try {
+      const result = await addChatMembers(chatId, targets.map(target => target.openId));
+      await replyMessage(msgId, memberActionSummary(targets, result, '添加'));
+      log('ok', 'chat-members', `add ${targets.length} member(s) to ${chatId}`);
+    } catch (err) {
+      log('error', 'chat-members', `add failed: ${err.message?.slice(0, 200)}`);
+      await replyMessage(msgId, `添加群成员失败: ${err.message?.slice(0, 200)}`);
+    }
+    return true;
+  },
+  'remove-member': async (args, msgId, _state, _openId, { chatId, chatType, mentions } = {}) => {
+    if (chatType !== 'group' || !chatId) {
+      await replyMessage(msgId, '只能在群聊中使用 /remove-member');
+      return true;
+    }
+
+    const confirmRemoved = args.trim().startsWith('confirm');
+    const targetArgs = confirmRemoved ? args.trim().slice('confirm'.length).trim() : args.trim();
+    const targets = resolveMemberTargets(targetArgs, mentions);
+    if (targets.length === 0) {
+      await replyMessage(msgId, '用法: /remove-member @用户\n确认执行: /remove-member confirm @用户');
+      return true;
+    }
+    if (!confirmRemoved) {
+      await replyMessage(msgId, `即将移除: ${targets.map(target => target.name || target.openId).join(', ')}\n如确认，请发送 /remove-member confirm @用户`);
+      return true;
+    }
+
+    try {
+      const result = await removeChatMembers(chatId, targets.map(target => target.openId));
+      await replyMessage(msgId, memberActionSummary(targets, result, '移除'));
+      log('ok', 'chat-members', `remove ${targets.length} member(s) from ${chatId}`);
+    } catch (err) {
+      log('error', 'chat-members', `remove failed: ${err.message?.slice(0, 200)}`);
+      await replyMessage(msgId, `移除群成员失败: ${err.message?.slice(0, 200)}`);
+    }
+    return true;
+  },
 };
 
-async function handleCommand(cmd, args, msgId, state, openId) {
+async function handleCommand(cmd, args, msgId, state, openId, context = {}) {
   // 管理员专属命令
   if (adminCommands[cmd]) {
-    return adminOnly(adminCommands[cmd])(args, msgId, state, openId);
+    return adminOnly(adminCommands[cmd])(args, msgId, state, openId, context);
   }
   switch (cmd) {
     case 'stop':
@@ -515,6 +648,9 @@ async function handleCommand(cmd, args, msgId, state, openId) {
         '/allow <open_id> — 添加用户到白名单',
         '/remove <open_id> — 从白名单移除用户',
         '/users — 查看白名单用户列表',
+        '/add-member @用户 — 添加群成员',
+        '/remove-member @用户 — 预览要移除的群成员',
+        '/remove-member confirm @用户 — 移除群成员',
       ].join('\n'));
       return true;
     default: return false;
@@ -522,7 +658,7 @@ async function handleCommand(cmd, args, msgId, state, openId) {
 }
 
 // ---- 核心查询 ----
-async function runClaudeQuery(prompt, msgId, state) {
+async function runAgentQuery(prompt, msgId, state) {
   if (state.status === 'running') {
     await replyMessage(msgId, '⏳ 上一个任务还在执行中，请等完成后再发');
     return;
@@ -544,16 +680,13 @@ async function runClaudeQuery(prompt, msgId, state) {
 
   const options = {
     cwd: state.cwd,
-    permissionMode: process.env.CLAUDE_PERMISSION_MODE || 'default',
     abortController,
-    disallowedTools: ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup'],
-    pathToClaudeCodeExecutable: process.env.CLAUDE_BIN || '/opt/homebrew/bin/claude',
-    appendSystemPrompt: 'Use the conversation language. Answer with the final result and only necessary next steps. If required parameters are missing, ask a concise clarifying question instead of guessing.',
-    includePartialMessages: true,
+    model: process.env.CODEX_MODEL,
+    sandboxMode: process.env.CODEX_SANDBOX_MODE || 'workspace-write',
   };
 
   if (state.sessionId) {
-    options.resume = state.sessionId;
+    options.resumeThreadId = state.sessionId;
   }
 
   let fullOutput = '';
@@ -561,7 +694,7 @@ async function runClaudeQuery(prompt, msgId, state) {
   let hadRealOutput = false; // 是否已累积到真实 turn 文本（区分 result 事件被污染为错误文本的情况）
 
   // 输出路由：长文本转 HTML 文件，超长分段，否则发送卡片。
-  // 正常完成与「Claude 进程异常退出但已拿到真实结果」的救回路径共用此函数
+  // 正常完成与「Codex 进程异常退出但已拿到真实结果」的救回路径共用此函数
   async function deliverResult(text, newFiles) {
     const slugRaw = state.lastPrompt?.replace(/[^a-zA-Z0-9一-鿿]/g, '-').slice(0, 30).replace(/-+/g, '-').replace(/^-|-$/g, '') || 'report';
     const slug = /[a-zA-Z]/.test(slugRaw) ? slugRaw : `report-${Date.now().toString(36)}`;
@@ -613,11 +746,11 @@ async function runClaudeQuery(prompt, msgId, state) {
 
   try {
     const beforeFiles = await listOutputFiles(join(state.cwd, 'outputs'));
-    for await (const event of query({ prompt: buildPrompt(prompt), options })) {
+    for await (const event of runCodexQuery({ prompt: buildPrompt(prompt), ...options, log })) {
       if (event.session_id && !state.sessionId) {
         state.sessionId = event.session_id;
         saveSessions().catch(() => {});
-        log('ok', 'init', `sessionId=${event.session_id}`);
+        log('ok', 'init', `threadId=${event.session_id}`);
       }
 
       // system.init
@@ -734,7 +867,7 @@ async function runClaudeQuery(prompt, msgId, state) {
       // 飞书 SDK 错误结构：err.code / err.msg，Axios 层：err.response?.data
       const feishuCode = err.code || err.response?.data?.code || '';
       const feishuMsg = err.msg || err.response?.data?.msg || '';
-      log('error', 'claude', `${err.message?.slice(0, 200)} | feishu_code=${feishuCode} feishu_msg=${feishuMsg}`);
+      log('error', 'codex', `${err.message?.slice(0, 200)} | feishu_code=${feishuCode} feishu_msg=${feishuMsg}`);
       // 卡片发送 400 → 转成 HTML 文件发，兜底纯文本
       if (err.message?.includes('400') && fullOutput) {
         try {
@@ -754,7 +887,7 @@ async function runClaudeQuery(prompt, msgId, state) {
           }
         }
       } else if (hadRealOutput && fullOutput) {
-        // 任务实际已成功（已累积到真实 turn 文本），只是 Claude 进程异常退出（如长连接被掐断）
+        // 任务实际已成功（已累积到真实 turn 文本），只是 Codex 进程异常退出（如长连接被掐断）
         // → 救回已算出的结果，而不是把进程错误字符串发给用户
         log('warn', 'recover', `process error (${err.message?.slice(0, 120)}) but real result exists (${fullOutput.length} chars) — delivering result`);
         try {
@@ -802,6 +935,13 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
     const openId = data.sender?.sender_id?.open_id || '';
     const name = data.sender?.sender_id?.name || openId.slice(-8);
     const msgType = rawMsg?.message_type;
+
+    // Authorization must happen before message content is logged or attachments are downloaded.
+    if (!isAllowed(openId, msg.chat_id)) {
+      log('warn', 'block', `${name} (${openId}) chat=${msg.chat_id?.slice(-8) || 'p2p'} not in contacts`);
+      return;
+    }
+
     log('info', 'debug', `type=${msgType} content=${(rawMsg?.content || '').slice(0, 300)}`);
 
     // 统一下载消息内附件（独立 image/file 消息 + post 富文本内嵌图片）
@@ -860,15 +1000,16 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
     const fullText = text + attachmentContext;
     log('info', 'recv', `${name} (${openId}) root=${rootId ? rootId.slice(-8) : 'new'}: ${fullText.length > 200 ? fullText.slice(0, 200) + '…' : fullText}`);
 
-    if (!isAllowed(openId, msg.chat_id)) {
-      log('warn', 'block', `${name} (${openId}) chat=${msg.chat_id?.slice(-8) || 'p2p'} not in contacts`);
-      return;
-    }
-
-    const command = parseCommand(text);
+    const mentions = extractMessageMentions(rawMsg);
+    const commandText = normalizeCommandText(text, mentions);
+    const command = parseCommand(commandText);
     if (command) {
       const state = rootId ? getSession(rootId) : null;
-      const handled = await handleCommand(command.cmd, command.args, msgId, state, openId);
+      const handled = await handleCommand(command.cmd, command.args, msgId, state, openId, {
+        chatId: msg.chat_id,
+        chatType: msg.chat_type,
+        mentions,
+      });
       if (handled) return;
     }
 
@@ -878,7 +1019,7 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
       state = getSession(rootId);
       if (!state) {
         log('info', 'topic', `new topic detected, fullRootId=${rootId}`);
-        state = createSession(rootId, openId);
+        state = await createSession(rootId, openId);
         // 新 topic：获取 rootId 对应的原始消息，注入到首次 prompt 中
         let originText = '';
         try {
@@ -896,7 +1037,7 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
         state.title = originText.slice(0, 50) || text.slice(0, 50);
       }
     } else {
-      state = createSession(msgId, openId);
+      state = await createSession(msgId, openId);
       state.title = text.slice(0, 50);
     }
 
@@ -911,7 +1052,7 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
 
     let promptWithContext = fullText + topicOriginContext;
     Promise.resolve()
-      .then(() => runClaudeQuery(promptWithContext, msgId, state))
+      .then(() => runAgentQuery(promptWithContext, msgId, state))
       .then(() => {
         // Thread attachments persist in session.attachments for cross-turn access
         // Temp files cleaned by startup sweep (>2h old)
@@ -986,23 +1127,20 @@ setInterval(() => {
 }, WS_CHECK_INTERVAL);
 
 startScheduler({
-  runClaudeQuery: async (prompt) => {
+  runAgentQuery: async (prompt) => {
     const state = { sessionId: null, cwd: defaultCwd, status: 'idle', title: prompt.slice(0, 50) };
     let output = '';
-    for await (const event of query({
+    for await (const event of runCodexQuery({
       prompt: buildPrompt(prompt),
-      options: {
-        cwd: state.cwd,
-        permissionMode: process.env.CLAUDE_PERMISSION_MODE || 'default',
-        disallowedTools: ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup'],
-        pathToClaudeCodeExecutable: process.env.CLAUDE_BIN || '/opt/homebrew/bin/claude',
-        appendSystemPrompt: 'Use the conversation language. Answer with the final result and only necessary next steps. If required parameters are missing, ask a concise clarifying question instead of guessing.',
-      },
+      cwd: state.cwd,
+      model: process.env.CODEX_MODEL,
+      sandboxMode: process.env.CODEX_SANDBOX_MODE || 'workspace-write',
+      log,
     })) {
       if (event.type === 'assistant' && event.message?.content) {
         const blocks = Array.isArray(event.message.content) ? event.message.content : [event.message.content];
         for (const b of blocks) {
-          if (b.type === 'text' && b.text) output += b.text;
+          if (b.type === 'text' && b.text) output = b.text;
         }
       }
       if (event.type === 'result' && event.result && !output) output = event.result;
@@ -1015,7 +1153,7 @@ startScheduler({
 });
 
 // 监听 tasks.json 变化自动热加载
-const TASKS_PATH = new URL('../tasks.json', import.meta.url).pathname;
+const TASKS_PATH = process.env.TASKS_FILE || new URL('../tasks.json', import.meta.url).pathname;
 watchFile(TASKS_PATH, { interval: 3000 }, () => {
   log('info', 'scheduler', 'tasks.json changed, reloading...');
   reloadScheduler().catch(err => log('error', 'scheduler', `reload failed: ${err.message}`));
