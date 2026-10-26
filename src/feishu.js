@@ -258,9 +258,10 @@ export async function recallMessageDetailed(messageId) {
 }
 
 /**
- * 主动发消息到群（用于管理员日志群推送）。
+ * 主动发送消息到群聊（用于撤回原因通知等）
  */
 export async function sendChatMessage(chatId, text) {
+  if (!chatId?.startsWith('oc_')) throw new Error('invalid chat_id');
   const resp = await getClient().im.message.create({
     params: { receive_id_type: 'chat_id' },
     data: {

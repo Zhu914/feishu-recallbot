@@ -3,7 +3,7 @@
 import 'dotenv/config';
 import lark from '@larksuiteoapi/node-sdk';
 import { runCodexQuery } from './codex.js';
-import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage } from './feishu.js';
+import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, sendChatMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage } from './feishu.js';
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
 import { initModeration, moderateMessage, getModerationStatus } from './moderation.js';
@@ -1047,6 +1047,7 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
         senderType: data.sender?.sender_type,
         senderOpenId: openId,
         recall: recallMessage,
+        sendRecallNotice: async (message) => sendChatMessage(msg.chat_id, message),
         notifyAdmin: contactsCache.adminOpenId
           ? async (message) => sendDirectMessage(contactsCache.adminOpenId, message)
           : undefined,
