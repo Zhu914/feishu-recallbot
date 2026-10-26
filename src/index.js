@@ -7,6 +7,7 @@ import { replyMessage, addReaction, deleteReaction, extractMessageText, extractA
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
 import { initModeration, moderateMessage, getModerationStatus } from './moderation.js';
+import { initAdRecall, isAdRecallCandidate, handleAdMessage, noteMemberJoined } from './ad-recall.js';
 
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
@@ -15,6 +16,7 @@ const defaultCwd = process.env.DEFAULT_CWD || process.cwd();
 // to a group. Direct messages still use the user allowlist.
 const GROUP_ACCESS_ALL = process.env.GROUP_ACCESS_ALL === 'true';
 const MODERATION_ALL_GROUPS = process.env.MODERATION_ALL_GROUPS === 'true';
+const AD_RECALL_ALL_GROUPS = process.env.AD_RECALL_ALL_GROUPS === 'true';
 
 if (!appId || !appSecret) { console.error('Missing FEISHU_APP_ID or FEISHU_APP_SECRET'); process.exit(1); }
 
@@ -192,6 +194,13 @@ ${userMessage}`;
 initFeishuClient(appId, appSecret);
 await initLog();
 initModeration(log);
+initAdRecall({
+  log,
+  appId,
+  adminOpenId: contactsCache.adminOpenId,
+  allGroups: AD_RECALL_ALL_GROUPS,
+  isChatAllowed: (chatId) => contactsCache.chatIds.has(chatId),
+});
 log('ok', 'boot', `Feishu bot started, log dir=${LOG_DIR}`);
 
 // 临时文件清理：启动时跑一次 + 每小时定时扫，删 mtime > 1 天的
@@ -1046,6 +1055,22 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
       if (blocked) return;
     }
 
+    // 自动广告撤回：将群消息传入分级识别（strong_ad → 撤回；weak_ad → 提醒+上报；normal → 放行）
+    if (isAdRecallCandidate({ chatType: msg.chat_type, senderType: data.sender?.sender_type, chatId: msg.chat_id })) {
+      const blocked = await handleAdMessage({
+        text: extractMessageText(data),
+        messageId: msgId,
+        chatId: msg.chat_id,
+        chatType: msg.chat_type,
+        senderOpenId: openId,
+        senderName: name,
+        createTime: Number(msg.create_time),
+        isReply: !!msg.parent_id, // 引用/回复某条消息 → 白名单
+        rawContent: rawMsg?.content || '',
+      });
+      if (blocked) return;
+    }
+
     // 统一下载消息内附件（独立 image/file 消息 + post 富文本内嵌图片）
     // 必须在 text 检查之前：纯图片消息（无文字）也要下载缓存，等文字消息来了一起处理。
     // 飞书话题里图文混排是 post 消息，图片作为 {tag:'img',image_key} 内嵌，
@@ -1161,6 +1186,11 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
         log('ok', 'file', `thread attachments preserved (${state.attachments?.length || 0} files in session)`);
       })
       .catch(err => log('error', 'fatal', err.message?.slice(0, 200)));
+  },
+  // 新成员入群事件：为广告撤回模块提供“入群时间 < 24 小时”的新人判定依据
+  // （需在飞书开放平台为应用订阅 im.chat.member.user.added_v1 事件）
+  'im.chat.member.user.added_v1': async (data) => {
+    noteMemberJoined(data);
   },
   'im.message.reaction.created_v1': noop,
   'im.message.reaction.deleted_v1': noop,
