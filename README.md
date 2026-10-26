@@ -37,6 +37,25 @@ npm install
 npm start
 ```
 
+## Group message moderation
+
+The bot can use the configured Codex model as an ephemeral, read-only JSON classifier for approved group chats. It is disabled by default.
+
+1. Add the target group's `chat_id` to `session/knowledge/contacts.md` under `## Allowed chats`. Moderation is intentionally limited to approved group chats.
+2. Configure `.env`:
+   - `MODERATION_ENABLED=true`
+   - `MODERATION_ENGINE=codex`
+   - `MODERATION_CONFIDENCE_THRESHOLD=0.9`
+   - Optional fast prefilter: `MODERATION_KEYWORDS=comma,separated,literal,keywords`
+   - Optional regex prefilter: `MODERATION_REGEXES=regex1;regex2`
+3. Start with `MODERATION_RECALL_ENABLED=false` (dry-run). Classifier decisions are written to `logs/moderation-audit.jsonl`; the moderation audit does not store original message text.
+4. After validating false positives, set `MODERATION_RECALL_ENABLED=true`.
+5. Grant the Feishu app permission to receive all group messages (for example `im:message.group_msg` or `im:message.group_msg:readonly`) and `im:message:recall`; for recalling another member's group message, the bot must be that group's owner, administrator, or creator.
+
+The Codex classifier is called from an isolated temporary working directory with `--sandbox read-only`, `--ephemeral`, and a JSON output schema. It receives the message as untrusted data and is instructed not to use tools. `MODERATION_CONCURRENCY` and `MODERATION_QUEUE_LIMIT` bound model invocation load. A classifier timeout, queue overflow, or invalid response is treated as allow/degraded and is never automatically recalled.
+
+Use `/moderation` as an administrator to inspect the current moderation configuration. Enabling this feature sends approved group message text to the configured model provider, so confirm that this matches your data-handling policy. The current classifier covers extracted text and rich-text content; it does not inspect images.
+
 ## Commands
 
 | Command | Description | Access |
@@ -50,6 +69,10 @@ npm start
 | `/add-member @user` | Add a mentioned user to the current group | Admin |
 | `/remove-member @user` | Preview removing a mentioned group member | Admin |
 | `/remove-member confirm @user` | Remove a mentioned user from the current group | Admin |
+| `/set-bot-admin` | Set the current bot as a group administrator | Admin |
+| `/moderation` | Show AI moderation configuration | Admin |
+
+`/set-bot-admin` calls `im/v1/chats/:chat_id/managers/add_managers` with the current bot's `app_id`. Feishu requires the app to have bot capability and the API permission, and the API caller must be the group owner when assigning administrators.
 
 ## Security notes
 

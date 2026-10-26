@@ -222,6 +222,18 @@ export async function updateMessage(messageId, text) {
 }
 
 /**
+ * 撤回消息。撤回群内他人消息时，机器人必须是群主、管理员或创建者。
+ */
+export async function recallMessage(messageId) {
+  if (!messageId?.startsWith('om_')) throw new Error('invalid message_id');
+  const resp = await getClient().im.message.delete({
+    path: { message_id: messageId },
+  });
+  if (resp?.code && resp.code !== 0) throw new Error(resp.msg || `Feishu error ${resp.code}`);
+  return resp?.data || {};
+}
+
+/**
  * 主动发消息给用户（用于定时任务等场景）
  */
 export async function sendDirectMessage(userId, text) {
@@ -303,6 +315,29 @@ export async function removeChatMembers(chatId, openIds) {
     path: { chat_id: chatId },
     params: { member_id_type: 'open_id' },
     data: { id_list: openIds },
+  });
+  if (resp?.code && resp.code !== 0) throw new Error(resp.msg || `Feishu error ${resp.code}`);
+  return resp?.data || {};
+}
+
+/**
+ * 指定群管理员。用户可使用 open_id/user_id/union_id；机器人使用 app_id。
+ */
+export async function addChatManagers(chatId, managerIds, managerIdType = 'open_id') {
+  const validIdTypes = new Set(['open_id', 'user_id', 'union_id', 'app_id']);
+  if (!chatId?.startsWith('oc_')) throw new Error('invalid chat_id');
+  if (!validIdTypes.has(managerIdType)) throw new Error('invalid member_id_type');
+  if (!Array.isArray(managerIds) || managerIds.length === 0 || managerIds.length > 50) {
+    throw new Error('管理员数量必须在 1-50 之间');
+  }
+  if (managerIds.some(id => typeof id !== 'string' || !id.trim())) {
+    throw new Error('invalid manager id');
+  }
+
+  const resp = await getClient().im.chatManagers.addManagers({
+    path: { chat_id: chatId },
+    params: { member_id_type: managerIdType },
+    data: { manager_ids: managerIds.map(id => id.trim()) },
   });
   if (resp?.code && resp.code !== 0) throw new Error(resp.msg || `Feishu error ${resp.code}`);
   return resp?.data || {};

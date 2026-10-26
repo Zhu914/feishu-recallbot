@@ -3,13 +3,18 @@
 import 'dotenv/config';
 import lark from '@larksuiteoapi/node-sdk';
 import { runCodexQuery } from './codex.js';
-import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers } from './feishu.js';
+import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage } from './feishu.js';
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
+import { initModeration, moderateMessage, getModerationStatus } from './moderation.js';
 
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
 const defaultCwd = process.env.DEFAULT_CWD || process.cwd();
+// Group-wide access keeps onboarding simple for bots that are deliberately added
+// to a group. Direct messages still use the user allowlist.
+const GROUP_ACCESS_ALL = process.env.GROUP_ACCESS_ALL === 'true';
+const MODERATION_ALL_GROUPS = process.env.MODERATION_ALL_GROUPS === 'true';
 
 if (!appId || !appSecret) { console.error('Missing FEISHU_APP_ID or FEISHU_APP_SECRET'); process.exit(1); }
 
@@ -117,7 +122,8 @@ async function loadContacts() {
 await loadContacts();
 
 function isAdmin(openId) { return openId === contactsCache.adminOpenId; }
-function isAllowed(openId, chatId) {
+function isAllowed(openId, chatId, chatType) {
+  if (GROUP_ACCESS_ALL && chatType === 'group') return true;
   if (chatId && contactsCache.chatIds.has(chatId)) return true;
   return contactsCache.openIds.has(openId);
 }
@@ -185,6 +191,7 @@ ${userMessage}`;
 
 initFeishuClient(appId, appSecret);
 await initLog();
+initModeration(log);
 log('ok', 'boot', `Feishu bot started, log dir=${LOG_DIR}`);
 
 // 临时文件清理：启动时跑一次 + 每小时定时扫，删 mtime > 1 天的
@@ -559,6 +566,27 @@ const adminCommands = {
     await replyMessage(msgId, removed ? `已移除 ${target}` : `${target} 不在联系人中`);
     return true;
   },
+  'moderation': async (_args, msgId) => {
+    const status = getModerationStatus();
+    await replyMessage(msgId, [
+      '消息审核配置：',
+      `enabled: ${status.enabled}`,
+      `mode: ${status.mode}`,
+      `engine: ${status.engine}`,
+      `model: ${status.model}`,
+      `confidence_threshold: ${status.confidenceThreshold}`,
+      `timeout_ms: ${status.timeoutMs}`,
+      `concurrency: ${status.concurrency}`,
+      `group_only: ${status.groupOnly}`,
+      `notify_admin: ${status.notifyAdmin}`,
+      `rules_prefilter: ${status.rulesPrefilter}`,
+      `keyword_rules: ${status.keywordCount}`,
+      `regex_rules: ${status.regexCount}`,
+      `exempt_users: ${status.exemptOpenIdCount}`,
+      `audit_file: ${status.auditFile}`,
+    ].join('\n'));
+    return true;
+  },
   users: async (_args, msgId) => {
     const lines = [...contactsCache.openIds].map(id =>
       `${id}${id === contactsCache.adminOpenId ? ' (admin)' : ''}`
@@ -584,6 +612,22 @@ const adminCommands = {
     } catch (err) {
       log('error', 'chat-members', `add failed: ${err.message?.slice(0, 200)}`);
       await replyMessage(msgId, `添加群成员失败: ${err.message?.slice(0, 200)}`);
+    }
+    return true;
+  },
+  'set-bot-admin': async (_args, msgId, _state, _openId, { chatId, chatType } = {}) => {
+    if (chatType !== 'group' || !chatId) {
+      await replyMessage(msgId, '只能在群聊中使用 /set-bot-admin');
+      return true;
+    }
+
+    try {
+      await addChatManagers(chatId, [appId], 'app_id');
+      await replyMessage(msgId, `已提交将机器人设为群管理员: ${appId}`);
+      log('ok', 'chat-managers', `set bot ${appId} as manager in ${chatId}`);
+    } catch (err) {
+      log('error', 'chat-managers', `set bot manager failed: ${err.message?.slice(0, 200)}`);
+      await replyMessage(msgId, `设置机器人管理员失败: ${err.message?.slice(0, 200)}`);
     }
     return true;
   },
@@ -651,6 +695,8 @@ async function handleCommand(cmd, args, msgId, state, openId, context = {}) {
         '/add-member @用户 — 添加群成员',
         '/remove-member @用户 — 预览要移除的群成员',
         '/remove-member confirm @用户 — 移除群成员',
+        '/set-bot-admin — 将当前机器人设为群管理员',
+        '/moderation — 查看消息审核配置',
       ].join('\n'));
       return true;
     default: return false;
@@ -924,6 +970,33 @@ async function runAgentQuery(prompt, msgId, state) {
   }
 }
 
+// Feishu can redeliver events when an event handler exceeds its acknowledgement
+// window. Deduplicate by message_id at the entry point so retries cannot run
+// moderation, Codex, file handling, or replies twice. The same protection also
+// prevents duplicate moderation audits/recalls.
+const eventSeen = new Map();
+const EVENT_SEEN_LIMIT = 10000;
+const EVENT_SEEN_TTL_MS = 10 * 60 * 1000;
+function isDuplicateEvent(messageId) {
+  if (!messageId) return false;
+  const now = Date.now();
+
+  // Map iteration order is insertion order; expire old entries without a full scan.
+  while (eventSeen.size > 0) {
+    const [oldestId, seenAt] = eventSeen.entries().next().value;
+    if (now - seenAt < EVENT_SEEN_TTL_MS) break;
+    eventSeen.delete(oldestId);
+  }
+
+  if (eventSeen.has(messageId)) return true;
+  eventSeen.set(messageId, now);
+  if (eventSeen.size > EVENT_SEEN_LIMIT) {
+    const oldestId = eventSeen.keys().next().value;
+    eventSeen.delete(oldestId);
+  }
+  return false;
+}
+
 // ---- 飞书事件 ----
 const noop = async () => {};
 const eventDispatcher = new lark.EventDispatcher({}).register({
@@ -936,13 +1009,42 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
     const name = data.sender?.sender_id?.name || openId.slice(-8);
     const msgType = rawMsg?.message_type;
 
+    if (isDuplicateEvent(msgId)) {
+      log('warn', 'duplicate', `ignored redelivered message=${msgId?.slice(-8)}`);
+      return;
+    }
+
     // Authorization must happen before message content is logged or attachments are downloaded.
-    if (!isAllowed(openId, msg.chat_id)) {
+    if (!isAllowed(openId, msg.chat_id, msg.chat_type)) {
       log('warn', 'block', `${name} (${openId}) chat=${msg.chat_id?.slice(-8) || 'p2p'} not in contacts`);
       return;
     }
 
-    log('info', 'debug', `type=${msgType} content=${(rawMsg?.content || '').slice(0, 300)}`);
+    log('info', 'debug', `type=${msgType} content_length=${(rawMsg?.content || '').length}`);
+
+    // Group moderation runs after chat authorization, but before attachments are
+    // downloaded or the message is handed to Codex. By default only explicitly
+    // approved chats are moderated; MODERATION_ALL_GROUPS opts in to every group
+    // event received by this bot. It does not bypass message authorization.
+    const shouldModerateGroup =
+      (MODERATION_ALL_GROUPS && msg.chat_type === 'group') ||
+      contactsCache.chatIds.has(msg.chat_id);
+    if (shouldModerateGroup && data.sender?.sender_type === 'user') {
+      const blocked = await moderateMessage({
+        text: extractMessageText(data),
+        messageId: msgId,
+        chatId: msg.chat_id,
+        chatType: msg.chat_type,
+        senderType: data.sender?.sender_type,
+        senderOpenId: openId,
+        recall: recallMessage,
+        notifyAdmin: contactsCache.adminOpenId
+          ? async (message) => sendDirectMessage(contactsCache.adminOpenId, message)
+          : undefined,
+        log,
+      });
+      if (blocked) return;
+    }
 
     // 统一下载消息内附件（独立 image/file 消息 + post 富文本内嵌图片）
     // 必须在 text 检查之前：纯图片消息（无文字）也要下载缓存，等文字消息来了一起处理。

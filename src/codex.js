@@ -18,7 +18,7 @@ function cliPath() {
   return 'codex';
 }
 
-function buildArgs({ resumeThreadId, model, sandboxMode }) {
+function buildArgs({ resumeThreadId, model, sandboxMode, ephemeral = false, ignoreRules = false, outputSchema = '' }) {
   // exec-level options must precede the optional `resume` subcommand.
   const args = ['exec', '--json', '--skip-git-repo-check'];
 
@@ -26,6 +26,9 @@ function buildArgs({ resumeThreadId, model, sandboxMode }) {
   // per-user workspace unless CODEX_SANDBOX_MODE explicitly overrides it.
   args.push('--sandbox', sandboxMode || 'workspace-write');
 
+  if (ephemeral) args.push('--ephemeral');
+  if (ignoreRules) args.push('--ignore-rules');
+  if (outputSchema) args.push('--output-schema', outputSchema);
   if (model) args.push('--model', model);
   if (resumeThreadId) args.push('resume', resumeThreadId);
   args.push('-'); // Read the prompt from stdin to avoid shell argument limits.
@@ -40,10 +43,13 @@ export async function* runCodexQuery({
   abortController = new AbortController(),
   model = process.env.CODEX_MODEL,
   sandboxMode = process.env.CODEX_SANDBOX_MODE || 'workspace-write',
+  ephemeral = false,
+  ignoreRules = false,
+  outputSchema = '',
   log = () => {},
 }) {
   const command = cliPath();
-  const args = buildArgs({ resumeThreadId, model, sandboxMode });
+  const args = buildArgs({ resumeThreadId, model, sandboxMode, ephemeral, ignoreRules, outputSchema });
   const env = { ...process.env };
   // dotenv values can be relative to the project root; CODEX_HOME should not
   // silently change when Codex changes its working directory.
