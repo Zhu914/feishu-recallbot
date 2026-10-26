@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "check": "node --check src/index.js && node --check src/feishu.js && node --check src/scheduler.js && node --check src/moderation.js && node --check src/codex.js"
+    "check": "node --check src/index.js && node --check src/feishu.js && node --check src/scheduler.js && node --check src/moderation.js && node --check src/ad-recall.js && node --check src/codex.js"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.63.0",

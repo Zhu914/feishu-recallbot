@@ -234,6 +234,45 @@ export async function recallMessage(messageId) {
 }
 
 /**
+ * 撤回消息（详细版）：返回 { ok, code, msg } 而不是抛错，
+ * 供广告撤回模块捕获 230026（无权限）/ 230009（超时限）/ 230050（消息不可见）等错误码写日志。
+ * 对应 DELETE /open-apis/im/v1/messages/{message_id}。
+ */
+export async function recallMessageDetailed(messageId) {
+  if (!messageId?.startsWith('om_')) return { ok: false, code: -1, msg: 'invalid message_id' };
+  try {
+    const resp = await getClient().im.message.delete({
+      path: { message_id: messageId },
+    });
+    if (resp?.code && resp.code !== 0) {
+      return { ok: false, code: resp.code, msg: resp.msg || `Feishu error ${resp.code}` };
+    }
+    return { ok: true, code: 0, msg: '' };
+  } catch (err) {
+    return {
+      ok: false,
+      code: err?.code ?? err?.response?.data?.code ?? -1,
+      msg: err?.msg || err?.message || 'unknown error',
+    };
+  }
+}
+
+/**
+ * 主动发消息到群（用于管理员日志群推送）。
+ */
+export async function sendChatMessage(chatId, text) {
+  const resp = await getClient().im.message.create({
+    params: { receive_id_type: 'chat_id' },
+    data: {
+      receive_id: chatId,
+      msg_type: 'interactive',
+      content: toCardContent(text),
+    },
+  });
+  return { messageId: resp.data.message_id };
+}
+
+/**
  * 主动发消息给用户（用于定时任务等场景）
  */
 export async function sendDirectMessage(userId, text) {
