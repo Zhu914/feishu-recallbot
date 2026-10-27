@@ -312,6 +312,32 @@ async function appendAudit(record, log) {
  * Returns true when the message is blocked from normal bot processing.
  * Dry-run mode never blocks, even when the classifier says block.
  */
+const RECALL_REASON_LABELS = {
+  keyword: '命中预设审核规则',
+  regex: '命中预设审核规则',
+  abuse: '辱骂或人身攻击',
+  harassment: '骚扰他人',
+  sexual: '色情低俗内容',
+  violence: '暴力恐吓内容',
+  illegal: '违法违规内容',
+  spam: '垃圾广告或诈骗信息',
+  privacy: '泄露敏感个人信息',
+  other: '违反社群规范',
+  safe: '安全内容',
+};
+
+function buildRecallNotice(classification) {
+  const reason = RECALL_REASON_LABELS[classification.category] || '违反社群规范';
+  const confidence = Math.round(classification.confidence * 100);
+  return [
+    '⚠️ 一条群消息已被撤回',
+    `撤回原因：${reason}`,
+    `审核类别：${classification.category}`,
+    `置信度：${confidence}%`,
+    '请遵守社群规范，文明交流。',
+  ].join('\n');
+}
+
 export async function moderateMessage({
   text,
   messageId,
@@ -320,6 +346,7 @@ export async function moderateMessage({
   senderType,
   senderOpenId,
   recall,
+  sendRecallNotice,
   notifyAdmin,
   log = () => {},
 }) {
@@ -381,6 +408,15 @@ export async function moderateMessage({
     action,
     error,
   }, log);
+
+  if (action === 'recalled' && sendRecallNotice) {
+    try {
+      await sendRecallNotice(buildRecallNotice(classification));
+      log('ok', 'moderation', `recall notice sent msg=${messageId}`);
+    } catch (err) {
+      log('warn', 'moderation', `recall notice failed msg=${messageId}: ${err.message?.slice(0, 200)}`);
+    }
+  }
 
   if (config.notifyAdmin && notifyAdmin && (shouldRecall || classification.decision === 'review' || error)) {
     try {
