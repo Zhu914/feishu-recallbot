@@ -11,9 +11,12 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const LOCAL_CODEX_BIN = fileURLToPath(new URL('../node_modules/.bin/codex', import.meta.url));
+// Windows 下 .bin/codex 是 sh 脚本，spawn 无法直接执行；改用 node 启动包内 JS 入口
+const LOCAL_CODEX_JS = fileURLToPath(new URL('../node_modules/@openai/codex/bin/codex.js', import.meta.url));
 
 function cliPath() {
   if (process.env.CODEX_BIN) return process.env.CODEX_BIN;
+  if (process.platform === 'win32' && existsSync(LOCAL_CODEX_JS)) return LOCAL_CODEX_JS;
   if (existsSync(LOCAL_CODEX_BIN)) return LOCAL_CODEX_BIN;
   return 'codex';
 }
@@ -50,6 +53,8 @@ export async function* runCodexQuery({
 }) {
   const command = cliPath();
   const args = buildArgs({ resumeThreadId, model, sandboxMode, ephemeral, ignoreRules, outputSchema });
+  // 入口是 .js 时（Windows 路径或自定义 CODEX_BIN），用当前 node 进程启动
+  const runViaNode = command.endsWith('.js');
   const env = { ...process.env };
   // dotenv values can be relative to the project root; CODEX_HOME should not
   // silently change when Codex changes its working directory.
@@ -57,7 +62,7 @@ export async function* runCodexQuery({
     env.CODEX_HOME = resolve(process.cwd(), env.CODEX_HOME);
   }
 
-  const child = spawn(command, args, {
+  const child = spawn(runViaNode ? process.execPath : command, runViaNode ? [command, ...args] : args, {
     cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],

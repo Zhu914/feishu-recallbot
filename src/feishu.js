@@ -17,173 +17,67 @@ export function getClient() {
   return client;
 }
 
-// 解析 markdown 表格行
-function parseTableRow(line) {
-  return line.split('|').slice(1, -1).map(c => c.trim());
-}
+// 飞书 text 消息不渲染 markdown：发送前把常见 markdown 语法降级为可读纯文本
+function toPlainText(text) {
+  if (typeof text !== 'string' || !text) return text;
 
-// 单个 markdown 表格 → 飞书卡片 table 元素
-function mdTableToCardElement(headerLine, dataLines) {
-  const headers = parseTableRow(headerLine);
-  const columns = headers.map((name, i) => ({
-    name: `c${i}`,
-    display_name: name,
-    data_type: 'lark_md',
-    width: 'auto',
-  }));
-  const rows = dataLines.map(line => {
-    const cells = parseTableRow(line);
-    const row = {};
-    columns.forEach((col, i) => { row[col.name] = cells[i] || ''; });
-    return row;
-  });
-  return {
-    tag: 'table',
-    page_size: Math.min(rows.length, 20),
-    row_height: 'low',
-    header_style: { bold: true, background_style: 'blue', align: 'left' },
-    columns,
-    rows,
-  };
-}
+  const entities = { amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ' };
+  const fromCode = code => { try { return String.fromCodePoint(code); } catch { return ''; } };
 
-// Unicode box-drawing 表格 → Markdown pipe table（让 buildCardElements 能识别并渲染为飞书卡片表格）
-function convertBoxTables(text) {
-  const isBoxLine = s => s && /^[┌┐└┘┬┴├┤┼│─]/.test(s.trim());
+  // 行内 markdown → 纯文本（仅作用于非代码行）
+  const inline = s => s
+    .replace(/^#{1,6}\s+(.+)$/, '$1')                                // # 标题 → 正文
+    .replace(/\*\*(.+?)\*\*/g, '$1')                                 // **加粗** → 加粗
+    .replace(/~~(.+?)~~/g, '$1')                                     // ~~删除线~~ → 删除线
+    .replace(/`([^`\n]+)`/g, '$1')                                   // `行内代码` → 行内代码
+    .replace(/!\[([^\]]*)\]\([^)\s]*\)/g, (m, alt) => alt ? `[图片:${alt}]` : '[图片]') // ![alt](url)
+    .replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (m, t, u) => (t && t !== u) ? `${t} (${u})` : u) // [文字](url) → 文字 (url)
+    .replace(/^>\s?/, '')                                            // 行首引用符 >
+    .replace(/<img[^>]*>/gi, '[图片]')
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, h) => fromCode(parseInt(h, 16)))  // 数字 HTML 实体还原
+    .replace(/&#(\d+);/g, (m, d) => fromCode(parseInt(d, 10)))
+    .replace(/&(amp|lt|gt|quot|nbsp);/g, (m, n) => entities[n]);
 
-  const lines = text.split('\n');
-  const result = [];
-  let i = 0;
-
-  while (i < lines.length) {
-    if (!isBoxLine(lines[i])) {
-      result.push(lines[i]);
-      i++;
-      continue;
-    }
-
-    const blockStart = i;
-    while (i < lines.length && isBoxLine(lines[i])) i++;
-    const block = lines.slice(blockStart, i);
-
-    // 提取数据行（以 │ 开头的行）
-    const dataRows = block.filter(line => line.trim().startsWith('│'));
-    if (dataRows.length === 0) {
-      result.push(...block);
-      continue;
-    }
-
-    // 按可见 │ 分割单元格
-    const rows = dataRows.map(line => {
-      const t = line.trim();
-      const parts = t.split('│');
-      if (parts[0] === '') parts.shift();
-      if (t.endsWith('│') && parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
-      return parts.map(c => c.trim());
-    });
-
-    // 分离标题行（1 列）和数据行（2+ 列）
-    const titles = [];
-    const tableRows = [];
-    for (const row of rows) {
-      if (row.length === 1) titles.push(row[0]);
-      else tableRows.push(row);
-    }
-
-    for (const t of titles) {
-      if (t) result.push(`**${t}**`);
-    }
-
-    if (tableRows.length > 0) {
-      const cols = tableRows[0].length;
-      result.push('| ' + tableRows[0].join(' | ') + ' |');
-      result.push('| ' + tableRows[0].map(() => '---').join(' | ') + ' |');
-      for (let r = 1; r < tableRows.length; r++) {
-        const padded = tableRows[r].length < cols
-          ? tableRows[r].concat(Array(cols - tableRows[r].length).fill(''))
-          : tableRows[r];
-        result.push('| ' + padded.join(' | ') + ' |');
-      }
-    }
+  // 逐行处理：去代码围栏行，代码块内容原样保留；去表格分隔行 |---|---|
+  const out = [];
+  let inFence = false;
+  for (const line of text.split('\n')) {
+    if (/^\s*```/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) { out.push(line); continue; }
+    if (/^\s*\|[-:| ]+\|\s*$/.test(line)) continue;
+    out.push(inline(line));
   }
-
-  return result.join('\n');
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-// 清洗飞书卡片不支持的 markdown：图片语法、超长 URL、HTML 标签
-function sanitizeForCard(text) {
-  return text
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '[$1]')                        // ![alt](url) → [alt]
-    .replace(/\[([^\]]*)\]\(https?:\/\/[^\s)]{200,}\)/g, '$1')         // [text](超长URL) → text
-    .replace(/<img[^>]*>/gi, '')                                        // strip <img> tags
-    .replace(/<[^>]+>/g, m => /^<(https?:\/\/|\/)/.test(m) ? m : '')  // strip non-link HTML tags
-    .replace(/&#x[0-9a-fA-F]+;/g, '')                                  // strip HTML entities
-    .trim();
-}
-
-// 拆分文本为 markdown 元素 + table 元素的混合数组
-function buildCardElements(text) {
-  text = sanitizeForCard(convertBoxTables(text));
-  const elements = [];
-  const lines = text.split('\n');
-  let i = 0;
-  const isPipeRow = s => /^\|.+\|$/.test(s);
-  const isSepRow = s => /^\|[-:| ]+\|$/.test(s);
-
-  while (i < lines.length) {
-    if (i + 2 < lines.length && isPipeRow(lines[i]) && isSepRow(lines[i + 1]) && isPipeRow(lines[i + 2])) {
-      // 表格开始：表头 + 分隔 + 至少一行数据
-      const headerLine = lines[i];
-      const dataLines = [];
-      let j = i + 2;
-      while (j < lines.length && isPipeRow(lines[j])) { dataLines.push(lines[j]); j++; }
-      elements.push(mdTableToCardElement(headerLine, dataLines));
-      i = j;
-    } else {
-      const buf = [];
-      while (i < lines.length) {
-        if (i + 2 < lines.length && isPipeRow(lines[i]) && isSepRow(lines[i + 1]) && isPipeRow(lines[i + 2])) break;
-        buf.push(lines[i]);
-        i++;
-      }
-      const content = buf.join('\n').trim().replace(/^#{1,6}\s+(.+)$/gm, '**$1**');
-      if (content) elements.push({ tag: 'markdown', content });
-    }
-  }
-  return elements.length > 0 ? elements : [{ tag: 'markdown', content: text }];
-}
-
-// 消息卡片：混合 markdown + table 元素
-function toCardContent(text) {
-  return JSON.stringify({
-    config: { wide_screen_mode: true },
-    elements: buildCardElements(text),
-  });
+// 文本消息 content：{"text": "..."}（发送前清洗 markdown）
+function toTextContent(text) {
+  return JSON.stringify({ text: toPlainText(text) });
 }
 
 /**
- * 回复消息（话题线程中），纯文本（卡片发送 400 时的降级方案）
+ * 回复消息（话题线程中），纯文本
  */
 export async function replyTextMessage(messageId, text) {
   const resp = await getClient().im.message.reply({
     path: { message_id: messageId },
     data: {
       msg_type: 'text',
-      content: JSON.stringify({ text }),
+      content: toTextContent(text),
     },
   });
   return { messageId: resp.data.message_id };
 }
 
 /**
- * 回复消息（话题线程中），使用 interactive 卡片渲染 markdown
+ * 回复消息（话题线程中），纯文本
  */
 export async function replyMessage(messageId, text) {
   const resp = await getClient().im.message.reply({
     path: { message_id: messageId },
     data: {
-      msg_type: 'interactive',
-      content: toCardContent(text),
+      msg_type: 'text',
+      content: toTextContent(text),
     },
   });
   return { messageId: resp.data.message_id };
@@ -216,7 +110,7 @@ export async function updateMessage(messageId, text) {
   await getClient().im.message.patch({
     path: { message_id: messageId },
     data: {
-      content: toCardContent(text),
+      content: toTextContent(text),
     },
   });
 }
@@ -266,8 +160,8 @@ export async function sendChatMessage(chatId, text) {
     params: { receive_id_type: 'chat_id' },
     data: {
       receive_id: chatId,
-      msg_type: 'interactive',
-      content: toCardContent(text),
+      msg_type: 'text',
+      content: toTextContent(text),
     },
   });
   return { messageId: resp.data.message_id };
@@ -281,8 +175,8 @@ export async function sendDirectMessage(userId, text) {
     params: { receive_id_type: 'open_id' },
     data: {
       receive_id: userId,
-      msg_type: 'interactive',
-      content: toCardContent(text),
+      msg_type: 'text',
+      content: toTextContent(text),
     },
   });
   return { messageId: resp.data.message_id };

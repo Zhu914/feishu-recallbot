@@ -9,7 +9,7 @@
 // 计数器为进程内存实现（Map + 滑动窗口）；多实例部署时可替换为 Redis。
 
 import { createHash } from 'crypto';
-import { getClient, recallMessageDetailed, sendDirectMessage, sendChatMessage } from './feishu.js';
+import { getClient, recallMessageDetailed, sendDirectMessage, sendChatMessage, replyMessage } from './feishu.js';
 
 // DELETE /open-apis/im/v1/messages/{message_id} 重点关注错误码
 const RECALL_ERROR_HINTS = {
@@ -25,6 +25,7 @@ const REASON_LABELS = {
   qr_code: '包含二维码',
   duplicate_burst: '5分钟内相同文本发送≥3次',
   marketing_newcomer: '营销词汇+入群不足24小时',
+  solitaire: '发起接龙（本群禁止）',
 };
 
 const DEFAULT_DOMAIN_WHITELIST = 'feishu.cn,feishu.com,larksuite.com,larkoffice.com';
@@ -191,7 +192,7 @@ async function getChatFacts(chatId) {
   const cached = chatFactsCache.get(chatId);
   if (cached && Date.now() - cached.fetchedAt < config.chatFactsTtlMs) return cached;
 
-  const entry = { fetchedAt: Date.now(), ok: false, botCanRecall: false, botInChat: false, adminUserIds: new Set() };
+  const entry = { fetchedAt: Date.now(), ok: false, botCanRecall: false, botInChat: false, adminUserIds: new Set(), chatName: '', memberNames: new Map() };
   try {
     const client = getClient();
     const [chatResp, inChatResp] = await Promise.all([
@@ -199,6 +200,22 @@ async function getChatFacts(chatId) {
       client.im.chatMembers.isInChat({ path: { chat_id: chatId } }).catch(() => null),
     ]);
     const chat = chatResp?.data || {};
+    entry.chatName = chat.name || '';
+    // 成员名单（open_id → 姓名），用于把通知里的 ID 显示为自然语言姓名
+    try {
+      let pageToken = '';
+      do {
+        const membersResp = await client.request({
+          method: 'GET',
+          url: `/open-apis/im/v1/chats/${chatId}/members`,
+          params: { member_id_type: 'open_id', page_size: 100, page_token: pageToken },
+        });
+        for (const m of membersResp?.data?.items || []) {
+          if (m.member_id) entry.memberNames.set(m.member_id, m.name || '');
+        }
+        pageToken = membersResp?.data?.page_token || '';
+      } while (pageToken);
+    } catch {}
     entry.botInChat = inChatResp?.data?.is_in_chat !== false;
     entry.botIsOwner = chat.owner_id === ctx.appId && !!ctx.appId;
     entry.botIsAdmin = Array.isArray(chat.bot_manager_id_list) && !!ctx.appId && chat.bot_manager_id_list.includes(ctx.appId);
@@ -219,6 +236,43 @@ async function getChatFacts(chatId) {
   return entry;
 }
 
+// ---------- 通知文案辅助：ID → 自然语言 ----------
+async function describeSender(chatId, senderOpenId, senderName = '') {
+  const facts = await getChatFacts(chatId);
+  const name = facts.memberNames?.get(senderOpenId) || '';
+  if (name) return name;
+  // index.js 的 senderName 兜底是 open_id 尾号（8 位十六进制），不是真实姓名时不采用
+  if (senderName && !/^[0-9a-f]{8}$/i.test(senderName)) return senderName;
+  return '未知成员';
+}
+
+async function chatLabel(chatId) {
+  const facts = await getChatFacts(chatId);
+  return facts.chatName || '群聊';
+}
+
+// ---------- 接龙识别 ----------
+// 覆盖两种形态：
+// 1. 文本接龙：以 “#接龙”/“接龙” 开头，或首行含“接龙”且正文为多行序号列表
+// 2. 原生接龙消息：卡片 title 为“接龙”，含“立即接龙/查看全部接龙”按钮或“参加群接龙”文案
+//    （结构实测：{"title":"接龙","elements":[[...],[{"tag":"button","text":"立即接龙"},...]]}）
+function looksLikeSolitaire(text, rawContent) {
+  const t = String(text || '').trim();
+  if (t) {
+    if (/^#*\s*接龙/.test(t)) return true;
+    const lines = t.split('\n').map(l => l.trim());
+    const numbered = lines.filter(l => /^(\d{1,3}[、.．)\s]|[①-⑩])/.test(l)).length;
+    if (/接龙/.test(lines[0] || '') && numbered >= 2) return true;
+  }
+  const raw = String(rawContent || '');
+  return raw.includes('"title":"接龙"')
+    || raw.includes('立即接龙')
+    || raw.includes('查看全部接龙')
+    || raw.includes('参加群接龙')
+    || raw.includes('solitaire')
+    || raw.includes('"tag":"join_list"');
+}
+
 // ---------- 分级识别 ----------
 /**
  * @param {object} input
@@ -235,6 +289,12 @@ export async function classifyMessage({ text, senderId, chatId, createTime, isRe
 
   // 白名单（优先于一切强特征）
   if (isReply) return { level: 'normal', reason: 'whitelist: 引用回复' };
+
+  // 强特征 0：接龙（要求“禁止任何人”，置于管理员白名单之前，仅保留引用回复豁免）
+  if (looksLikeSolitaire(raw, rawContent)) {
+    return { level: 'strong_ad', reason: 'solitaire' };
+  }
+
   if (config.internalTerms.length > 0 && containsAny(raw, config.internalTerms)) {
     return { level: 'normal', reason: 'whitelist: 内部术语' };
   }
@@ -319,25 +379,27 @@ export async function handleAdMessage({
 
   ctx.log('info', 'ad-recall', `${verdict.level} (${verdict.reason}) from=${senderName}(${senderOpenId?.slice(-8)}) msg=${messageId?.slice(-8)} text="${summarize(text, 40)}"`);
 
-  // ---- weak_ad：不撤回；单聊提醒发送者 + 管理员日志群记录 ----
+  // ---- weak_ad：不撤回；在发送者消息下回复提醒 + 管理员日志群记录 ----
   if (verdict.level === 'weak_ad') {
     try {
-      await sendDirectMessage(senderOpenId, [
+      await replyMessage(messageId, [
         '⚠️ 群消息提醒',
         '您在群内发送的消息包含营销推广相关内容，已被系统记录观察。',
         '请遵守群规，避免发布广告、二维码或联系方式；多次触发将转交管理员处理。',
       ].join('\n'));
     } catch (err) {
-      ctx.log('warn', 'ad-recall', `提醒卡片发送失败 to=${senderOpenId?.slice(-8)}: ${err.message?.slice(0, 150)}`);
+      ctx.log('warn', 'ad-recall', `提醒回复发送失败 msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 150)}`);
     }
-    await pushAdminLog([
-      '[疑似广告待观察]',
-      `发送者：${senderName} (${senderOpenId})`,
-      `群：${chatId}`,
+    const [who, where] = await Promise.all([describeSender(chatId, senderOpenId, senderName), chatLabel(chatId)]);
+    const summary = summarize(text, 50);
+    const lines = [
+      '📋 疑似广告，已标记观察（未撤回）',
+      `发送者：${who}`,
+      `所在群：${where}`,
       `原因：${reasonLabel(verdict.reason)}`,
-      `内容摘要：${summarize(text, 50)}`,
-      `message_id：${messageId}`,
-    ]);
+    ];
+    if (summary) lines.push(`内容摘要：${summary}`);
+    await pushAdminLog(lines);
     return false;
   }
 
@@ -348,15 +410,17 @@ export async function handleAdMessage({
   const brakeCount = countRecent(brakeHistory, senderOpenId, now, config.brakeWindowMs);
   if (brakeCount >= config.brakeLimit) {
     ctx.log('warn', 'ad-recall', `刹车触发：${senderOpenId?.slice(-8)} 5分钟内已撤回 ${brakeCount} 次，暂停自动撤回 msg=${messageId?.slice(-8)}`);
-    await pushAdminLog([
-      '[自动撤回-安全刹车]',
-      `发送者：${senderName} (${senderOpenId})`,
+    const [who, where] = await Promise.all([describeSender(chatId, senderOpenId, senderName), chatLabel(chatId)]);
+    const summary = summarize(text, 50);
+    const lines = [
+      '🛑 自动撤回已触发安全刹车',
+      `发送者：${who}`,
+      `所在群：${where}`,
       `该用户 ${Math.round(config.brakeWindowMs / 60000)} 分钟内已被自动撤回 ${brakeCount} 次，已暂停对其自动撤回，请人工处理。`,
-      `群：${chatId}`,
       `原因：${reasonLabel(verdict.reason)}`,
-      `内容摘要：${summarize(text, 50)}`,
-      `message_id：${messageId}`,
-    ]);
+    ];
+    if (summary) lines.push(`内容摘要：${summary}`);
+    await pushAdminLog(lines);
     return true;
   }
 
@@ -364,14 +428,16 @@ export async function handleAdMessage({
   const facts = await getChatFacts(chatId);
   if (facts.ok && !facts.botCanRecall) {
     ctx.log('warn', 'ad-recall', `权限预检未通过：机器人非群主/管理员（chat=${chatId?.slice(-8)}），跳过撤回 msg=${messageId?.slice(-8)}`);
-    await pushAdminLog([
-      '[自动撤回-权限预检未通过]',
-      `机器人当前不是群 ${chatId} 的群主/管理员，无法自动撤回，请人工处理。`,
-      `发送者：${senderName} (${senderOpenId})`,
+    const [who, where] = await Promise.all([describeSender(chatId, senderOpenId, senderName), chatLabel(chatId)]);
+    const summary = summarize(text, 50);
+    const lines = [
+      '⚠️ 无法自动撤回：机器人不是该群的管理员，请人工处理',
+      `所在群：${where}`,
+      `发送者：${who}`,
       `原因：${reasonLabel(verdict.reason)}`,
-      `内容摘要：${summarize(text, 50)}`,
-      `message_id：${messageId}`,
-    ]);
+    ];
+    if (summary) lines.push(`内容摘要：${summary}`);
+    await pushAdminLog(lines);
     return true;
   }
   if (!facts.ok) {
@@ -383,23 +449,33 @@ export async function handleAdMessage({
   if (!result.ok) {
     const known = RECALL_ERROR_HINTS[result.code];
     ctx.log('error', 'ad-recall', `撤回失败 msg=${messageId} code=${result.code}${known ? ` (${known})` : ''} ${result.msg?.slice(0, 150)}`);
-    await pushAdminLog([
-      '[自动撤回-失败]',
-      `发送者：${senderName} (${senderOpenId})`,
-      `错误码：${result.code}${known ? `（${known}）` : ''}`,
-      `原因：${reasonLabel(verdict.reason)}`,
-      `内容摘要：${summarize(text, 50)}`,
-      `message_id：${messageId}`,
-    ]);
+    const [who, where] = await Promise.all([describeSender(chatId, senderOpenId, senderName), chatLabel(chatId)]);
+    const summary = summarize(text, 50);
+    const lines = [
+      '❌ 自动撤回失败，请人工处理',
+      `发送者：${who}`,
+      `所在群：${where}`,
+      `失败原因：${known || `错误码 ${result.code}`}`,
+      `判定原因：${reasonLabel(verdict.reason)}`,
+    ];
+    if (summary) lines.push(`内容摘要：${summary}`);
+    await pushAdminLog(lines);
     return true;
   }
 
   // 撤回成功：计数 + 留痕
   pushAndCount(brakeHistory, senderOpenId, now, config.brakeWindowMs);
   ctx.log('ok', 'ad-recall', `已撤回 msg=${messageId} sender=${senderName}(${senderOpenId?.slice(-8)}) reason=${verdict.reason}`);
-  await pushAdminLog([
-    `[自动撤回] 发送者：${senderName}，原因：${reasonLabel(verdict.reason)}，内容摘要：${summarize(text, 50)}，message_id：${messageId}`,
-  ]);
+  const [who, where] = await Promise.all([describeSender(chatId, senderOpenId, senderName), chatLabel(chatId)]);
+  const summary = summarize(text, 50);
+  const lines = [
+    '⚠️ 已自动撤回一条消息',
+    `发送者：${who}`,
+    `所在群：${where}`,
+    `原因：${reasonLabel(verdict.reason)}`,
+  ];
+  if (summary) lines.push(`内容摘要：${summary}`);
+  await pushAdminLog(lines);
   return true;
 }
 

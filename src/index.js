@@ -2,6 +2,7 @@
 
 import 'dotenv/config';
 import lark from '@larksuiteoapi/node-sdk';
+import { fileURLToPath } from 'url';
 import { runCodexQuery } from './codex.js';
 import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, sendChatMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage } from './feishu.js';
 
@@ -21,7 +22,8 @@ const AD_RECALL_ALL_GROUPS = process.env.AD_RECALL_ALL_GROUPS === 'true';
 if (!appId || !appSecret) { console.error('Missing FEISHU_APP_ID or FEISHU_APP_SECRET'); process.exit(1); }
 
 // ---- 单例锁：启动时自动杀旧实例，防止多实例抢 WS ----
-const PID_FILE = join(new URL('..', import.meta.url).pathname, '.feishu-bot.pid');
+const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const PID_FILE = join(PROJECT_ROOT, '.feishu-bot.pid');
 try {
   const oldPid = parseInt(await readFile(PID_FILE, 'utf-8').catch(() => '0'), 10);
   if (oldPid && oldPid !== process.pid) {
@@ -48,7 +50,7 @@ process.on('uncaughtException', (err) => {
 
 // ---- 日志 ----
 const LEVEL_STYLE = { info: '36m', ok: '32m', warn: '33m', error: '31m', dim: '2m' };
-const LOG_DIR = join(new URL('..', import.meta.url).pathname, 'logs');
+const LOG_DIR = join(PROJECT_ROOT, 'logs');
 const LOG_RETAIN_DAYS = 1;
 let logFile = '';
 
@@ -253,7 +255,7 @@ cleanupWorkspaceOutputs();
 setInterval(cleanupWorkspaceOutputs, WORKSPACE_CLEANUP_INTERVAL_MS);
 
 // minutes/ 妙记转写缓存清理：每天扫，删项目内 minutes/ 下 >1 天的
-const MINUTES_DIR = join(new URL('..', import.meta.url).pathname, 'minutes');
+const MINUTES_DIR = join(PROJECT_ROOT, 'minutes');
 const MINUTES_MAX_AGE_MS = 86400000; // 1 天
 async function cleanupMinutes() {
   const entries = await readdir(MINUTES_DIR).catch(() => []);
@@ -279,7 +281,7 @@ await loadSessions();
 
 const FEISHU_MSG_LIMIT = 8000;
 const HTML_OUTPUT_THRESHOLD = 3000; // 超过此长度自动转 HTML，不塞卡片
-const OUTPUTS_DIR = join(new URL('..', import.meta.url).pathname, 'outputs');
+const OUTPUTS_DIR = join(PROJECT_ROOT, 'outputs');
 const TYPING_EMOJI = 'Typing';
 
 // 列出某 outputs/ 目录下所有文件（相对路径集合），用于识别本次会话新生成的文件
@@ -453,7 +455,7 @@ async function createSession(rootId, openId = '') {
 
   // Link shared prompt resources into the workspace before the first Codex
   // process starts; otherwise spawn(cwd) can race with directory creation.
-  const projectRoot = new URL('..', import.meta.url).pathname;
+  const projectRoot = PROJECT_ROOT;
   const symlinks = [['skills', 'skills'], ['session/knowledge', 'knowledge'], ['AGENTS.md', 'AGENTS.md']];
   for (const [src, linkName] of symlinks) {
     const link = join(userWorkspace, linkName);
@@ -903,7 +905,6 @@ async function runAgentQuery(prompt, msgId, state) {
     // 有结果就当成功，即使进程 exit code 非 0
     if (gotResult && fullOutput) {
       state.status = 'done';
-      log('ok', 'reply', `${fullOutput.length} chars`);
     } else if (!fullOutput) {
       fullOutput = '(no output)';
       state.status = 'done';
@@ -911,8 +912,9 @@ async function runAgentQuery(prompt, msgId, state) {
       state.status = 'done';
     }
 
-    // 输出路由：有文件发文件 / 长文本转 HTML 文件发 / 否则卡片
+    // 输出路由：有文件发文件 / 长文本转 HTML 文件发 / 否则纯文本
     await deliverResult(fullOutput, newFiles);
+    log('ok', 'reply', `delivered ${fullOutput.length} chars`);
   } catch (err) {
     if (abortController.signal.aborted) {
       state.status = 'stopped';
@@ -1286,7 +1288,7 @@ startScheduler({
 });
 
 // 监听 tasks.json 变化自动热加载
-const TASKS_PATH = process.env.TASKS_FILE || new URL('../tasks.json', import.meta.url).pathname;
+const TASKS_PATH = process.env.TASKS_FILE || join(PROJECT_ROOT, 'tasks.json');
 watchFile(TASKS_PATH, { interval: 3000 }, () => {
   log('info', 'scheduler', 'tasks.json changed, reloading...');
   reloadScheduler().catch(err => log('error', 'scheduler', `reload failed: ${err.message}`));
