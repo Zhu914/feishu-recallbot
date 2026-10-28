@@ -99,6 +99,10 @@ export function initModeration(log = () => {}) {
     }
   }
 
+  const confidenceThreshold = parseNumber('MODERATION_CONFIDENCE_THRESHOLD', 0.9, 0, 1);
+  // 提醒档阈值：block 且置信度落在 [warnThreshold, confidenceThreshold) → 只发提醒卡片不撤回
+  const warnThreshold = Math.min(parseNumber('MODERATION_WARN_THRESHOLD', 0.7, 0, 1), confidenceThreshold);
+
   config = {
     enabled: parseBool('MODERATION_ENABLED', false),
     recallEnabled: parseBool('MODERATION_RECALL_ENABLED', false),
@@ -106,7 +110,8 @@ export function initModeration(log = () => {}) {
     notifyAdmin: parseBool('MODERATION_NOTIFY_ADMIN', false),
     engine,
     rulesPrefilter: parseBool('MODERATION_RULES_PREFILTER', true),
-    confidenceThreshold: parseNumber('MODERATION_CONFIDENCE_THRESHOLD', 0.9, 0, 1),
+    confidenceThreshold,
+    warnThreshold,
     timeoutMs: parseNumber('MODERATION_TIMEOUT_MS', 15000, 1000, 120000),
     concurrency: parseNumber('MODERATION_CONCURRENCY', 2, 1, 20),
     queueLimit: parseNumber('MODERATION_QUEUE_LIMIT', 100, 0, 10000),
@@ -121,7 +126,7 @@ export function initModeration(log = () => {}) {
   };
 
   const mode = !config.enabled ? 'disabled' : config.recallEnabled ? 'recall' : 'dry-run';
-  log('info', 'moderation', `initialized mode=${mode} engine=${engine} rules=${keywords.length + regexes.length} threshold=${config.confidenceThreshold}`);
+  log('info', 'moderation', `initialized mode=${mode} engine=${engine} rules=${keywords.length + regexes.length} threshold=${config.confidenceThreshold} warn=${config.warnThreshold}`);
   if (config.enabled && engine === 'rules' && keywords.length === 0 && regexes.length === 0) {
     log('warn', 'moderation', 'rules engine enabled but no rules configured');
   }
@@ -136,6 +141,7 @@ export function getModerationStatus() {
     groupOnly: config.groupOnly,
     notifyAdmin: config.notifyAdmin,
     confidenceThreshold: config.confidenceThreshold,
+    warnThreshold: config.warnThreshold,
     timeoutMs: config.timeoutMs,
     concurrency: config.concurrency,
     queueLimit: config.queueLimit,
@@ -341,6 +347,7 @@ export async function moderateMessage({
   senderOpenId,
   recall,
   sendRecallNotice,
+  sendWarnNotice,
   notifyAdmin,
   log = () => {},
 }) {
@@ -360,8 +367,15 @@ export async function moderateMessage({
     classification.decision === 'block' &&
     classification.confidence >= config.confidenceThreshold;
 
+  // 提醒档：block 或 review 且置信度 ≥ 提醒线、未达撤回线 → 只发提醒卡片，不撤回不拦截。
+  // 撤回仍仅限明确的 block（review 是模型自己不确定的判定，只提醒不重罚）。
+  const shouldWarn =
+    !shouldRecall &&
+    (classification.decision === 'block' || classification.decision === 'review') &&
+    classification.confidence >= config.warnThreshold;
+
   // Safe classifier output needs no audit record.
-  if (!shouldRecall && classification.decision !== 'review' && !classifierError && !classification.degraded) {
+  if (!shouldRecall && !shouldWarn && classification.decision !== 'review' && !classifierError && !classification.degraded) {
     return false;
   }
 
@@ -377,6 +391,8 @@ export async function moderateMessage({
       recallError = err.message || String(err);
       log('error', 'moderation', `recall failed msg=${messageId}: ${recallError.slice(0, 200)}`);
     }
+  } else if (shouldWarn) {
+    action = 'warn';
   } else if (classification.decision === 'block' && classification.confidence < config.confidenceThreshold) {
     action = 'below-threshold';
   } else if (classification.decision === 'review') {
@@ -413,7 +429,17 @@ export async function moderateMessage({
     }
   }
 
-  if (config.notifyAdmin && notifyAdmin && (shouldRecall || classification.decision === 'review' || error)) {
+  // 提醒档卡片：与撤回警示卡同风格，标题为「群消息提醒」，原因带「疑似」前缀（由调用方渲染）
+  if (action === 'warn' && sendWarnNotice) {
+    try {
+      await sendWarnNotice(classification);
+      log('ok', 'moderation', `warn notice sent msg=${messageId} confidence=${classification.confidence}`);
+    } catch (err) {
+      log('warn', 'moderation', `warn notice failed msg=${messageId}: ${err.message?.slice(0, 200)}`);
+    }
+  }
+
+  if (config.notifyAdmin && notifyAdmin && (shouldRecall || shouldWarn || classification.decision === 'review' || error)) {
     try {
       await notifyAdmin([
         '⚠️ 群消息审核结果',

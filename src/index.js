@@ -1165,6 +1165,8 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
           recall: recallMessage,
           // 撤回警告统一用警示卡片（带底部灰色小字）；不再发“几行文字”式纯文本通知
           sendRecallNotice: async (classification) => sendCardMessage(msg.chat_id, buildRecallNoticeCard(moderationReasonLabel(classification))),
+          // AI 审核提醒档（置信度 0.7~0.9）：只发提醒卡片不撤回，文案带“疑似”前缀
+          sendWarnNotice: async (classification) => sendCardMessage(msg.chat_id, buildRecallNoticeCard(`疑似${moderationReasonLabel(classification)}，请注意言辞`, '⚠️ 群消息提醒')),
           notifyAdmin: contactsCache.adminOpenId
             ? async (message) => sendDirectMessage(contactsCache.adminOpenId, message)
             : undefined,

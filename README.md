@@ -50,7 +50,8 @@ The bot can use the configured Codex model as an ephemeral, read-only JSON class
    - Optional regex prefilter: `MODERATION_REGEXES=regex1;regex2`
 3. Start with `MODERATION_RECALL_ENABLED=false` (dry-run). Classifier decisions are written to `logs/moderation-audit.jsonl`; the moderation audit does not store original message text.
 4. After validating false positives, set `MODERATION_RECALL_ENABLED=true`.
-5. Grant the Feishu app permission to receive all group messages (for example `im:message.group_msg` or `im:message.group_msg:readonly`) and `im:message:recall`; for recalling another member's group message, the bot must be that group's owner, administrator, or creator.
+5. Warn tier: `block` decisions with confidence in `[MODERATION_WARN_THRESHOLD, MODERATION_CONFIDENCE_THRESHOLD)` (default 0.7–0.9) get a reminder card in the group without recall or blocking.
+6. Grant the Feishu app permission to receive all group messages (for example `im:message.group_msg` or `im:message.group_msg:readonly`) and `im:message:recall`; for recalling another member's group message, the bot must be that group's owner, administrator, or creator.
 
 The Codex classifier is called from an isolated temporary working directory with `--sandbox read-only`, `--ephemeral`, and a JSON output schema. It receives the message as untrusted data and is instructed not to use tools. `MODERATION_CONCURRENCY` and `MODERATION_QUEUE_LIMIT` bound model invocation load. A classifier timeout, queue overflow, or invalid response is treated as allow/degraded and is never automatically recalled.
 
@@ -60,7 +61,7 @@ Group owners and user administrators are exempt from moderation via `isChatAdmin
 
 ## Ad recall
 
-Ad recall classifies group messages into `strong_ad` (auto-recalled), `weak_ad` (sender warning + admin report), and `normal` (no action) from deterministic rules: non-whitelisted links, phone numbers, WeChat IDs, QR codes, duplicate bursts, marketing words from newcomers, and forbidden solitaires.
+Ad recall classifies group messages into `strong_ad` (auto-recalled), `weak_ad` (sender warning + admin report), and `normal` (no action) from deterministic rules: non-whitelisted links, phone numbers, WeChat IDs, QR codes, duplicate bursts, marketing words from newcomers, forbidden solitaires, and unambiguous profanity words (`profanity.words` in `config/ad-recall.json`, disabled when `profanity.enabled` is false; gray-area insults are left to AI moderation).
 
 1. Configure `config/ad-recall.json`. The file is tracked in git because it holds policy values only — no secrets. `enabled` gates the feature; `allGroups: true` covers every group the bot is in (no per-group registration); `excludedChats` lists chat_ids to opt specific groups out; empty `domainWhitelist`/`marketingWords` keep the built-in defaults; a missing or invalid file disables the feature.
 2. Subscribe the app to `im.chat.member.user.added_v1` (newcomer detection) and grant `im:message:recall`; recalling another member's message requires the bot to be the group owner, administrator, or creator.

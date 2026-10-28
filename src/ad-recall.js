@@ -30,6 +30,8 @@ const REASON_LABELS = {
   duplicate_burst: '5分钟内相同文本发送≥3次',
   marketing_newcomer: '营销词汇+入群不足24小时',
   solitaire: '发起接龙（本群禁止）',
+  profanity: '包含辱骂性词汇',
+  gray_profanity: '包含不友善词汇，请注意言辞',
 };
 
 const DEFAULT_DOMAIN_WHITELIST = 'feishu.cn,feishu.com,larksuite.com,larkoffice.com';
@@ -37,6 +39,14 @@ const DEFAULT_MARKETING_WORDS = [
   '优惠', '促销', '特价', '秒杀', '限时', '折扣', '免费领', '免费送', '加微信', '加我',
   '私聊', '兼职', '刷单', '日结', '高薪', '引流', '获客', '代购', '一手货源', '低息',
   '贷款', '办证', '开发票', '推广', '招商', '招代理',
+];
+
+// 确定性脏话词表：只收录无歧义的辱骂词（命中即 strong_ad 撤回）。
+// 灰度词（白痴/弱智/脑残等可能在正常语境出现）不进词表，由 AI 审核（moderation）兜底识别。
+const DEFAULT_PROFANITY_WORDS = [
+  '傻逼', '傻b', 'sb', '二逼', '傻吊', '傻屌',
+  '草泥马', '草你妈', '操你妈', '肏你妈', '日你妈', '干你妈', '你妈死了', 'nmsl',
+  '妈卖批', '狗日的', '王八蛋', '婊子', '贱人', '贱货', '杂种',
 ];
 
 let config = {
@@ -51,6 +61,11 @@ let config = {
   brakeLimit: 3,
   chatFactsTtlMs: 5 * 60 * 1000,
   excludedChats: [],
+  profanity: {
+    enabled: false,
+    words: DEFAULT_PROFANITY_WORDS,
+    warnWords: [],
+  },
   voteControl: {
     enabled: true,
   },
@@ -109,6 +124,15 @@ export function initAdRecall({ log = () => {}, appId = '', adminOpenId = '', isC
     brakeWindowMs: Number(fileConfig.brakeWindowMs) || 5 * 60 * 1000,
     brakeLimit: Number(fileConfig.brakeLimit) || 3,
     excludedChats: Array.isArray(fileConfig.excludedChats) ? fileConfig.excludedChats.filter(c => typeof c === 'string' && c.startsWith('oc_')) : [],
+    profanity: {
+      enabled: fileConfig.profanity?.enabled === true,
+      words: Array.isArray(fileConfig.profanity?.words) && fileConfig.profanity.words.length
+        ? fileConfig.profanity.words.map(w => String(w || '').trim()).filter(Boolean)
+        : DEFAULT_PROFANITY_WORDS,
+      warnWords: Array.isArray(fileConfig.profanity?.warnWords)
+        ? fileConfig.profanity.warnWords.map(w => String(w || '').trim()).filter(Boolean)
+        : [],
+    },
     voteControl: {
       enabled: fileConfig.voteControl?.enabled !== false,
     },
@@ -124,6 +148,7 @@ export function initAdRecall({ log = () => {}, appId = '', adminOpenId = '', isC
   log('info', 'ad-recall', `initialized enabled=${config.enabled} allGroups=${ctx.allGroups} ` +
     `whitelistDomains=${config.domainWhitelist.length} internalTerms=${config.internalTerms.length} ` +
     `marketingWords=${config.marketingWords.length} voteControl=${config.voteControl.enabled} ` +
+    `profanity=${config.profanity.enabled ? `${config.profanity.words.length}词+${config.profanity.warnWords.length}灰度` : 'off'} ` +
     `adminLog=${ctx.adminLogChatId ? ctx.adminLogChatId.slice(-8) : (adminOpenId ? 'admin-dm' : 'NONE')}`);
   log('info', 'ad-recall',
     '新人判定依赖 im.chat.member.user.added_v1 事件（需在开放平台订阅），未收到入群事件的成员按非新人处理');
@@ -194,6 +219,24 @@ function hasQrCodeHint(text) { return QR_HINT_RE.test(text); }
 function containsAny(text, words) {
   const lower = text.toLowerCase();
   return words.some(w => w && lower.includes(w.toLowerCase()));
+}
+
+// 词表匹配：中文词对「去分隔符文本」做子串匹配（防"傻 逼"/"傻.逼"变体）；
+// 纯字母数字词按独立词边界匹配（防 "usb 接口" 误中 "sb"）。
+function findWordIn(text, words) {
+  if (!config.profanity.enabled || !Array.isArray(words) || words.length === 0) return '';
+  const raw = String(text || '').toLowerCase();
+  const compact = raw.replace(/[\s.,!?。！？，、~*_\-·'"]+/g, '');
+  for (const word of words) {
+    const t = String(word || '').toLowerCase().trim().replace(/\s+/g, '');
+    if (!t) continue;
+    if (/^[a-z0-9]+$/.test(t)) {
+      if (new RegExp(`(^|[^a-z0-9])${t}([^a-z0-9]|$)`).test(raw)) return word;
+    } else if (compact.includes(t)) {
+      return word;
+    }
+  }
+  return '';
 }
 
 function normalizeForHash(text) {
@@ -368,6 +411,18 @@ export async function classifyMessage({ text, senderId, chatId, createTime, isRe
     if (facts.adminUserIds.has(senderId)) {
       return { level: 'normal', reason: 'whitelist: 群管理员/群主' };
     }
+  }
+
+  // 强特征（确定性）：脏话词表命中即撤回；灰度辱骂词由 AI 审核（moderation）兜底
+  const profanityHit = findWordIn(raw, config.profanity.words);
+  if (profanityHit) {
+    return { level: 'strong_ad', reason: 'profanity', detail: profanityHit };
+  }
+
+  // 灰度词（如死字词，语境歧义大）：只提醒不撤回，不计违规
+  const grayHit = findWordIn(raw, config.profanity.warnWords);
+  if (grayHit) {
+    return { level: 'weak_ad', reason: 'gray_profanity', detail: grayHit };
   }
 
   const ts = Number(createTime) || Date.now();
