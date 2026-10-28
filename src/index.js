@@ -4,7 +4,7 @@ import 'dotenv/config';
 import lark from '@larksuiteoapi/node-sdk';
 import { fileURLToPath } from 'url';
 import { runCodexQuery } from './codex.js';
-import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage, sendCardMessage, getBotOpenId } from './feishu.js';
+import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage, sendCardMessage, replyCardMessage, getBotOpenId } from './feishu.js';
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
 import { initModeration, moderateMessage, getModerationStatus, moderationReasonLabel } from './moderation.js';
@@ -1139,8 +1139,29 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
         senderName: name,
         senderType: data.sender?.sender_type,
         rawContent: rawMsg?.content || '',
+        rootId: rootId || '',
       });
       return;
+    }
+
+    // 确定性规则（词表/广告/灰度）先于 AI 审核执行：命中即毫秒级处理，
+    // 且已被词表提醒（warned）的消息跳过 AI 审核的重复提醒卡（同话题只发一张提醒卡）。
+    let adWarned = false;
+    if (isAdRecallCandidate({ chatType: msg.chat_type, senderType: data.sender?.sender_type, chatId: msg.chat_id })) {
+      const adResult = await handleAdMessage({
+        text: extractMessageText(data),
+        messageId: msgId,
+        chatId: msg.chat_id,
+        chatType: msg.chat_type,
+        senderOpenId: openId,
+        senderName: name,
+        createTime: Number(msg.create_time),
+        isReply: !!msg.parent_id, // 引用/回复某条消息 → 白名单
+        rawContent: rawMsg?.content || '',
+        rootId: rootId || '',
+      });
+      if (adResult.blocked) return;
+      adWarned = adResult.warned;
     }
 
     // Group moderation runs after chat authorization, but before attachments are
@@ -1150,7 +1171,11 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
     const shouldModerateGroup =
       (MODERATION_ALL_GROUPS && msg.chat_type === 'group') ||
       contactsCache.chatIds.has(msg.chat_id);
-    if (shouldModerateGroup && data.sender?.sender_type === 'user') {
+    // 词表已提醒（灰度词命中）→ 词表判定优先：跳过 AI 审核。
+    // 灰度词的语义是「只提醒不撤回」，不允许 AI 层再补发卡片或升级为撤回。
+    if (adWarned) {
+      log('dim', 'moderation', `skip (ad-recall 已提醒，词表优先) msg=${msgId?.slice(-8)}`);
+    } else if (shouldModerateGroup && data.sender?.sender_type === 'user') {
       // 机器人管理员/群主/群管理员豁免（与 ad-recall 同源；群信息不可用时也保守豁免，避免误撤）
       if (openId === contactsCache.adminOpenId || await isRecallExempt(msg.chat_id, openId)) {
         log('dim', 'moderation', `skip (whitelist: 群管理员/群主) msg=${msgId?.slice(-8)} from=${name}(${openId.slice(-8)})`);
@@ -1163,10 +1188,23 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
           senderType: data.sender?.sender_type,
           senderOpenId: openId,
           recall: recallMessage,
-          // 撤回警告统一用警示卡片（带底部灰色小字）；不再发“几行文字”式纯文本通知
-          sendRecallNotice: async (classification) => sendCardMessage(msg.chat_id, buildRecallNoticeCard(moderationReasonLabel(classification))),
+          // 撤回/提醒卡片统一改为「话题内回复」（root 优先，已撤回消息回复失败时降级群发），不再单独刷屏
+          sendRecallNotice: async (classification) => {
+            try {
+              await replyCardMessage(rootId || msgId, buildRecallNoticeCard(moderationReasonLabel(classification)));
+            } catch {
+              await sendCardMessage(msg.chat_id, buildRecallNoticeCard(moderationReasonLabel(classification)));
+            }
+          },
           // AI 审核提醒档（置信度 0.7~0.9）：只发提醒卡片不撤回，文案带“疑似”前缀
-          sendWarnNotice: async (classification) => sendCardMessage(msg.chat_id, buildRecallNoticeCard(`疑似${moderationReasonLabel(classification)}，请注意言辞`, '⚠️ 群消息提醒')),
+          sendWarnNotice: async (classification) => {
+            const card = buildRecallNoticeCard(`疑似${moderationReasonLabel(classification)}，请注意言辞`, '⚠️ 群消息提醒');
+            try {
+              await replyCardMessage(rootId || msgId, card);
+            } catch {
+              await sendCardMessage(msg.chat_id, card);
+            }
+          },
           notifyAdmin: contactsCache.adminOpenId
             ? async (message) => sendDirectMessage(contactsCache.adminOpenId, message)
             : undefined,
@@ -1174,22 +1212,6 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
         });
         if (blocked) return;
       }
-    }
-
-    // 自动广告撤回：将群消息传入分级识别（strong_ad → 撤回；weak_ad → 提醒+上报；normal → 放行）
-    if (isAdRecallCandidate({ chatType: msg.chat_type, senderType: data.sender?.sender_type, chatId: msg.chat_id })) {
-      const blocked = await handleAdMessage({
-        text: extractMessageText(data),
-        messageId: msgId,
-        chatId: msg.chat_id,
-        chatType: msg.chat_type,
-        senderOpenId: openId,
-        senderName: name,
-        createTime: Number(msg.create_time),
-        isReply: !!msg.parent_id, // 引用/回复某条消息 → 白名单
-        rawContent: rawMsg?.content || '',
-      });
-      if (blocked) return;
     }
 
     // 统一下载消息内附件（独立 image/file 消息 + post 富文本内嵌图片）

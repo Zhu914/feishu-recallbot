@@ -13,7 +13,7 @@ import { createHash } from 'crypto';
 import { readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import { getClient, recallMessageDetailed, removeChatMembers, sendCardMessage, updateCardMessage } from './feishu.js';
+import { getClient, recallMessageDetailed, removeChatMembers, sendCardMessage, replyCardMessage, updateCardMessage } from './feishu.js';
 
 // DELETE /open-apis/im/v1/messages/{message_id} 重点关注错误码
 const RECALL_ERROR_HINTS = {
@@ -351,6 +351,20 @@ async function chatLabel(chatId) {
   return facts.chatName || '群聊';
 }
 
+// 提醒/撤回提示卡：优先以回复形式发到原消息的话题里（root 优先，避免回复已撤回消息失败），
+// 回复失败（如消息已撤回且无 root）时降级为群内单独发卡，保证提示不丢。
+async function sendNoticeCard({ chatId, messageId, rootId = '' }, card) {
+  const replyTarget = (rootId && rootId.startsWith('om_')) ? rootId : messageId;
+  if (replyTarget?.startsWith('om_')) {
+    try {
+      return await replyCardMessage(replyTarget, card);
+    } catch (err) {
+      ctx.log('dim', 'notice', `话题回复卡片失败，降级群发 msg=${String(replyTarget).slice(-8)}: ${err.message?.slice(0, 120)}`);
+    }
+  }
+  return sendCardMessage(chatId, card);
+}
+
 // ---------- 接龙识别 ----------
 // 覆盖两种形态：
 // 1. 文本接龙：以 “#接龙”/“接龙” 开头，或首行含“接龙”且正文为多行序号列表
@@ -504,7 +518,7 @@ export function isVoteControlCandidate({ chatType, senderType, chatId }) {
  * 返回 true 表示已被本模块接管（调用方应终止后续流程）；false 表示放行或功能未覆盖。
  */
 export async function handleVoteMessage({
-  messageId, chatId, chatType, senderOpenId, senderName = '', senderType, rawContent = '',
+  messageId, chatId, chatType, senderOpenId, senderName = '', senderType, rawContent = '', rootId = '',
 }) {
   if (!isVoteControlCandidate({ chatType, senderType, chatId })) return false;
 
@@ -532,7 +546,7 @@ export async function handleVoteMessage({
 
   ctx.log('ok', 'vote', `已撤回投票 msg=${messageId} sender=${senderName}(${senderOpenId?.slice(-8)}) topic="${summarize(topic, 40)}"`);
   try {
-    await sendCardMessage(chatId, buildRecallNoticeCard('群投票仅限群主或群管理员发起，如有需要请联系群管理员', '🗳️ 投票已被撤回'));
+    await sendNoticeCard({ chatId, messageId, rootId }, buildRecallNoticeCard('群投票仅限群主或群管理员发起，如有需要请联系群管理员', '🗳️ 投票已被撤回'));
   } catch (err) {
     ctx.log('warn', 'vote', `投票撤回提醒卡片发送失败 msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 150)}`);
   }
@@ -545,41 +559,50 @@ function reasonLabel(reason) {
   return REASON_LABELS[reason] || reason;
 }
 
+// 卡片文案：广告类特征不向群成员暴露具体判定细节，统一提示「疑似垃圾广告」；
+// 辱骂/灰度词/接龙保留各自文案；日志仍记录精确 reason 便于管理员追溯。
+const AD_REASONS = new Set(['non_whitelist_link', 'phone_number', 'wechat_id', 'qr_code', 'duplicate_burst', 'marketing_newcomer']);
+function cardReasonLabel(reason) {
+  return AD_REASONS.has(reason) ? '疑似垃圾广告或诈骗信息，请注意言辞' : reasonLabel(reason);
+}
+
 // ---------- 动作路由 ----------
 /**
- * 处理一条群消息。返回 true 表示已被广告模块接管（调用方应终止后续流程）。
+ * 处理一条群消息。返回 { blocked, warned }：
+ *   blocked=true  消息已被本模块接管/撤回（调用方应终止后续流程）
+ *   warned=true   已在话题内发出提醒卡片（weak_ad；调用方可据此跳过 AI 审核的重复提醒）
  */
 export async function handleAdMessage({
-  text, messageId, chatId, chatType, senderOpenId, senderName = '', createTime, isReply, rawContent = '',
+  text, messageId, chatId, chatType, senderOpenId, senderName = '', createTime, isReply, rawContent = '', rootId = '',
 }) {
-  if (!isAdRecallCandidate({ chatType, senderType: 'user', chatId })) return false;
+  if (!isAdRecallCandidate({ chatType, senderType: 'user', chatId })) return { blocked: false, warned: false };
 
   let verdict;
   try {
     verdict = await classifyMessage({ text, senderId: senderOpenId, chatId, createTime, isReply, rawContent });
   } catch (err) {
     ctx.log('error', 'ad-recall', `classify failed msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 200)}`);
-    return false;
+    return { blocked: false, warned: false };
   }
   if (verdict.level === 'normal') {
     // 白名单放行打点：让「检查了但被豁免」可见；普通无关消息不打，避免刷屏
     if (String(verdict.reason || '').startsWith('whitelist:')) {
       ctx.log('dim', 'ad-recall', `normal (${verdict.reason}) msg=${messageId?.slice(-8)} from=${senderName}(${senderOpenId?.slice(-8)})`);
     }
-    return false;
+    return { blocked: false, warned: false };
   }
 
   ctx.log('info', 'ad-recall', `${verdict.level} (${verdict.reason}) from=${senderName}(${senderOpenId?.slice(-8)}) msg=${messageId?.slice(-8)} text="${summarize(text, 40)}"`);
 
-  // ---- weak_ad：不撤回；在群内发统一风格的警示卡片提醒（日志群不发） ----
+  // ---- weak_ad：不撤回；在原消息话题内回复统一风格的警示卡片（日志群不发） ----
   if (verdict.level === 'weak_ad') {
     try {
-      await sendCardMessage(chatId, buildRecallNoticeCard(reasonLabel(verdict.reason), '⚠️ 群消息提醒'));
+      await sendNoticeCard({ chatId, messageId, rootId }, buildRecallNoticeCard(cardReasonLabel(verdict.reason), '⚠️ 群消息提醒'));
     } catch (err) {
       ctx.log('warn', 'ad-recall', `提醒卡片发送失败 msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 150)}`);
     }
     ctx.log('info', 'ad-recall', `weak_ad 观察记录 from=${senderOpenId?.slice(-8)} reason=${verdict.reason} msg=${messageId?.slice(-8)}`);
-    return false;
+    return { blocked: false, warned: true };
   }
 
   // ---- strong_ad ----
@@ -591,7 +614,7 @@ export async function handleAdMessage({
     ctx.log('warn', 'ad-recall', `刹车触发：${senderOpenId?.slice(-8)} 5分钟内已撤回 ${brakeCount} 次，暂停自动撤回 msg=${messageId?.slice(-8)}`);
     // 刹车触发同样计入踢出计数（刷屏已确认，撤回虽已暂停）
     await noteViolationAndMaybeAsk({ chatId, senderOpenId, senderName, reason: verdict.reason, text });
-    return true;
+    return { blocked: true, warned: false };
   }
 
   // 权限预检仅作参考：本地 owner_id/bot_manager_id_list 判定不覆盖群创建者等身份，
@@ -608,20 +631,20 @@ export async function handleAdMessage({
   if (!result.ok) {
     const known = RECALL_ERROR_HINTS[result.code];
     ctx.log('error', 'ad-recall', `撤回失败 msg=${messageId} code=${result.code}${known ? ` (${known})` : ''} ${result.msg?.slice(0, 150)}`);
-    return true;
+    return { blocked: true, warned: false };
   }
 
-  // 撤回成功：计数 + 群内就地发送提醒卡片（原因 + 底部警示；日志群只发踢出卡片）
+  // 撤回成功：计数 + 在原消息话题内回复提醒卡片（原因 + 底部警示；日志群只发踢出卡片）
   pushAndCount(brakeHistory, senderOpenId, now, config.brakeWindowMs);
   ctx.log('ok', 'ad-recall', `已撤回 msg=${messageId} sender=${senderName}(${senderOpenId?.slice(-8)}) reason=${verdict.reason}`);
   try {
-    await sendCardMessage(chatId, buildRecallNoticeCard(reasonLabel(verdict.reason)));
+    await sendNoticeCard({ chatId, messageId, rootId }, buildRecallNoticeCard(cardReasonLabel(verdict.reason)));
   } catch (err) {
     ctx.log('warn', 'ad-recall', `撤回提醒卡片发送失败 msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 150)}`);
   }
   // 撤回成功 → 计入踢出计数（双窗口），达阈值弹管理员确认卡片
   await noteViolationAndMaybeAsk({ chatId, senderOpenId, senderName, reason: verdict.reason, text });
-  return true;
+  return { blocked: true, warned: false };
 }
 
 // ---------- 违规踢出（管理员卡片确认；bot 永不自动踢人） ----------
