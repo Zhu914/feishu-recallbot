@@ -108,6 +108,18 @@ export async function sendCardMessage(receiveId, card, receiveIdType = 'chat_id'
 }
 
 /**
+ * 以卡片回复某条消息（话题内回复/引用回复），用于撤回与提醒提示不单独刷屏。
+ */
+export async function replyCardMessage(messageId, card) {
+  if (!messageId?.startsWith('om_')) throw new Error('invalid message_id');
+  const resp = await getClient().im.message.reply({
+    path: { message_id: messageId },
+    data: { msg_type: 'interactive', content: JSON.stringify(card) },
+  });
+  return { messageId: resp.data.message_id };
+}
+
+/**
  * 更新已发送卡片内容（按钮点击后原地改状态，防重复操作）。
  */
 export async function updateCardMessage(messageId, card) {
