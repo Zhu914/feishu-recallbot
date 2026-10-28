@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "allGroups": true,
+  "adminLogChatId": "oc_7f393ba3464dfe51af51d02bd2271c7c",
+  "excludedChats": [],
+  "domainWhitelist": [],
+  "internalTerms": [],
+  "marketingWords": [],
+  "duplicateWindowMs": 300000,
+  "duplicateThreshold": 3,
+  "newcomerHours": 24,
+  "brakeWindowMs": 300000,
+  "brakeLimit": 3,
+  "kick": {
+    "enabled": true,
+    "burstThreshold": 3,
+    "burstWindowMs": 600000,
+    "dailyThreshold": 8,
+    "dailyWindowMs": 86400000,
+    "maxPendingCases": 10
+  }
+}

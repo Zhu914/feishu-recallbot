@@ -56,6 +56,31 @@ The Codex classifier is called from an isolated temporary working directory with
 
 Use `/moderation` as an administrator to inspect the current moderation configuration. Enabling this feature sends approved group message text to the configured model provider, so confirm that this matches your data-handling policy. The current classifier covers extracted text and rich-text content; it does not inspect images.
 
+Group owners and user administrators are exempt from moderation via `isChatAdmin` (the same group-facts whitelist and cache used by ad recall). If the group-info lookup fails, the exemption does not apply for that check.
+
+## Ad recall
+
+Ad recall classifies group messages into `strong_ad` (auto-recalled), `weak_ad` (sender warning + admin report), and `normal` (no action) from deterministic rules: non-whitelisted links, phone numbers, WeChat IDs, QR codes, duplicate bursts, marketing words from newcomers, and forbidden solitaires.
+
+1. Configure `config/ad-recall.json`. The file is tracked in git because it holds policy values only — no secrets. `enabled` gates the feature; `allGroups: true` covers every group the bot is in (no per-group registration); `excludedChats` lists chat_ids to opt specific groups out; empty `domainWhitelist`/`marketingWords` keep the built-in defaults; a missing or invalid file disables the feature.
+2. Subscribe the app to `im.chat.member.user.added_v1` (newcomer detection) and grant `im:message:recall`; recalling another member's message requires the bot to be the group owner, administrator, or creator.
+3. Repeat offenders trigger a confirmation card to `adminLogChatId` (falls back to the admin DM when empty): 3 recalls within 10 minutes or 8 within 24 hours — strong-ad recalls and brake triggers both count. The bot never kicks on its own; removal happens only when the contacts.md admin taps "移出群聊" on the card. This requires the card-interaction capability and the `card.action.trigger` event subscription. Ignoring a case dismisses that card only and keeps the counters. Group owners/admins and the bot admin never enter the kick flow.
+4. When a message is recalled, the bot posts a short reason notice in that group (no message content). The admin log chat carries only kick confirmation cards; recall, brake, and failure events stay in local logs. Group-owner/admin exemption fails safe: if group facts cannot be fetched, the message is exempt rather than recalled. Message events older than five minutes are treated as stale and dropped — Feishu redelivers unacked events after restarts, and history is never re-judged or recalled.
+
+## Group reply policy
+
+In group chats the bot only answers when @-mentioned (`config/reply-policy.json`, synced with git). Moderation and ad recall still run on **every** group message; direct messages and `/commands` are unaffected.
+
+```json
+{
+  "groupRequireMention": true,
+  "groupSessionFollowUp": true
+}
+```
+
+- `groupRequireMention` — reply in groups only when the bot is @-mentioned. Set to `false` to restore replying to every message.
+- `groupSessionFollowUp` — follow-up messages in a topic that already has a session still get replies, so multi-turn conversations are not interrupted. Set to `false` for strict @-only.
+
 ## Commands
 
 | Command | Description | Access |
@@ -70,6 +95,7 @@ Use `/moderation` as an administrator to inspect the current moderation configur
 | `/remove-member @user` | Preview removing a mentioned group member | Admin |
 | `/remove-member confirm @user` | Remove a mentioned user from the current group | Admin |
 | `/set-bot-admin` | Set the current bot as a group administrator | Admin |
+| `/set-log-chat` | Set the current group as the admin log chat (audit trail + kick-confirm cards) | Admin |
 | `/moderation` | Show AI moderation configuration | Admin |
 
 `/set-bot-admin` calls `im/v1/chats/:chat_id/managers/add_managers` with the current bot's `app_id`. Feishu requires the app to have bot capability and the API permission, and the API caller must be the group owner when assigning administrators.

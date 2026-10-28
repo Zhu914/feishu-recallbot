@@ -326,16 +326,10 @@ const RECALL_REASON_LABELS = {
   safe: '安全内容',
 };
 
-function buildRecallNotice(classification) {
-  const reason = RECALL_REASON_LABELS[classification.category] || '违反社群规范';
-  const confidence = Math.round(classification.confidence * 100);
-  return [
-    '⚠️ 一条群消息已被撤回',
-    `撤回原因：${reason}`,
-    `审核类别：${classification.category}`,
-    `置信度：${confidence}%`,
-    '请遵守社群规范，文明交流。',
-  ].join('\n');
+// 撤回原因标签：交给调用方渲染统一风格的警示卡片（ad-recall 的 buildRecallNoticeCard）。
+// 本模块不再自行发送“几行文字”式纯文本通知——群内警告只保留卡片一种样式。
+export function moderationReasonLabel(classification) {
+  return RECALL_REASON_LABELS[classification?.category] || '违反社群规范';
 }
 
 export async function moderateMessage({
@@ -411,7 +405,8 @@ export async function moderateMessage({
 
   if (action === 'recalled' && sendRecallNotice) {
     try {
-      await sendRecallNotice(buildRecallNotice(classification));
+      // 回调入参是 classification 对象（不是文本）：卡片渲染由调用方统一处理
+      await sendRecallNotice(classification);
       log('ok', 'moderation', `recall notice sent msg=${messageId}`);
     } catch (err) {
       log('warn', 'moderation', `recall notice failed msg=${messageId}: ${err.message?.slice(0, 200)}`);

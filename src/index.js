@@ -4,11 +4,11 @@ import 'dotenv/config';
 import lark from '@larksuiteoapi/node-sdk';
 import { fileURLToPath } from 'url';
 import { runCodexQuery } from './codex.js';
-import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, sendChatMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage } from './feishu.js';
+import { replyMessage, addReaction, deleteReaction, extractMessageText, extractAttachmentSpecs, downloadMessageFile, initFeishuClient, sendDirectMessage, getOriginalMessage, replyWithFile, extractMessageMentions, addChatMembers, removeChatMembers, addChatManagers, recallMessage, sendCardMessage, getBotOpenId } from './feishu.js';
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
-import { initModeration, moderateMessage, getModerationStatus } from './moderation.js';
-import { initAdRecall, isAdRecallCandidate, handleAdMessage, noteMemberJoined } from './ad-recall.js';
+import { initModeration, moderateMessage, getModerationStatus, moderationReasonLabel } from './moderation.js';
+import { initAdRecall, isAdRecallCandidate, handleAdMessage, noteMemberJoined, isRecallExempt, handleKickCardAction, setAdminLogChat, buildRecallNoticeCard, isKickAdjudicator } from './ad-recall.js';
 
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
@@ -17,7 +17,6 @@ const defaultCwd = process.env.DEFAULT_CWD || process.cwd();
 // to a group. Direct messages still use the user allowlist.
 const GROUP_ACCESS_ALL = process.env.GROUP_ACCESS_ALL === 'true';
 const MODERATION_ALL_GROUPS = process.env.MODERATION_ALL_GROUPS === 'true';
-const AD_RECALL_ALL_GROUPS = process.env.AD_RECALL_ALL_GROUPS === 'true';
 
 if (!appId || !appSecret) { console.error('Missing FEISHU_APP_ID or FEISHU_APP_SECRET'); process.exit(1); }
 
@@ -37,7 +36,11 @@ try {
   }
 } catch {}
 await writeFile(PID_FILE, String(process.pid)).catch(() => {});
-process.on('exit', () => { try { unlinkSync(PID_FILE); } catch {} });
+process.on('exit', () => {
+  try { unlinkSync(PID_FILE); } catch {}
+  // 去重记录落盘：跨重启后仍能识别飞书重投递的旧事件（SEEN_EVENTS_FILE 定义在后，此处惰性引用）
+  try { writeFileSync(SEEN_EVENTS_FILE, JSON.stringify([...eventSeen.entries()].map(([id, ts]) => ({ id, ts })))); } catch {}
+});
 
 // stdout EPIPE 兜底：父进程关闭管道时静默退出，不崩进程
 process.stdout.on('error', (err) => {
@@ -153,7 +156,7 @@ async function removeContact(openId) {
 }
 
 // ---- 知识库预加载（注入 prompt，不靠 Codex 自己读） ----
-import { watchFile, unlinkSync } from 'fs';
+import { watchFile, unlinkSync, writeFileSync } from 'fs';
 const STYLE_FILE_KB = new URL('../session/knowledge/style.md', import.meta.url);
 const AGENTS_FILE = new URL('../AGENTS.md', import.meta.url);
 
@@ -195,12 +198,21 @@ ${userMessage}`;
 
 initFeishuClient(appId, appSecret);
 await initLog();
+
+// 群聊回复策略：config/reply-policy.json（策略参数，随 git 同步；缺文件/缺键按内置默认值）
+// groupRequireMention：群里只有 @机器人 才触发 AI 回复（审核/广告撤回仍逐条执行，不受影响）
+// groupSessionFollowUp：已有会话的话题内追问视为继续对话，仍回复（避免多轮对话被打断）
+let REPLY_POLICY = { groupRequireMention: true, groupSessionFollowUp: true };
+try {
+  const replyPolicyRaw = await readFile(new URL('../config/reply-policy.json', import.meta.url), 'utf-8');
+  REPLY_POLICY = { ...REPLY_POLICY, ...JSON.parse(replyPolicyRaw) };
+} catch {}
+log('info', 'boot', `reply policy: groupRequireMention=${REPLY_POLICY.groupRequireMention}, groupSessionFollowUp=${REPLY_POLICY.groupSessionFollowUp}`);
 initModeration(log);
 initAdRecall({
   log,
   appId,
   adminOpenId: contactsCache.adminOpenId,
-  allGroups: AD_RECALL_ALL_GROUPS,
   isChatAllowed: (chatId) => contactsCache.chatIds.has(chatId),
 });
 log('ok', 'boot', `Feishu bot started, log dir=${LOG_DIR}`);
@@ -486,6 +498,22 @@ function parseCommand(text) {
 }
 
 // 群里常见写法是 @机器人 /command，这里只移除命令前方的 mention 占位符。
+// 是否 @ 了本机器人：与 bot 自身 open_id（getBotOpenId，bot/v3/info）比对。
+// 拿不到机器人 ID 时按“未 @”处理并留痕一次：宁可漏回，也不误回。
+let botMentionWarned = false;
+async function isBotMentioned(mentions) {
+  const botOpenId = await getBotOpenId();
+  if (!botOpenId) {
+    if (!botMentionWarned) {
+      log('warn', 'reply', '无法获取机器人 open_id（bot/v3/info），群聊 @ 识别暂不可用，先按未 @ 处理');
+      botMentionWarned = true;
+    }
+    return false;
+  }
+  botMentionWarned = false;
+  return mentions.some((m) => m.openId === botOpenId);
+}
+
 function normalizeCommandText(text, mentions = []) {
   let normalized = text.trim();
   for (const mention of mentions) {
@@ -642,6 +670,21 @@ const adminCommands = {
     }
     return true;
   },
+  'set-log-chat': async (_args, msgId, _state, _openId, { chatId, chatType } = {}) => {
+    if (chatType !== 'group' || !chatId) {
+      await replyMessage(msgId, '只能在群聊中使用 /set-log-chat');
+      return true;
+    }
+
+    try {
+      await setAdminLogChat(chatId);
+      await replyMessage(msgId, '✅ 已将本群设为管理员日志群\n撤回留痕与踢出确认卡片将发送到这里（config/ad-recall.json 已更新）');
+    } catch (err) {
+      log('error', 'ad-recall', `set-log-chat failed: ${err.message?.slice(0, 200)}`);
+      await replyMessage(msgId, `设置失败: ${err.message?.slice(0, 200)}`);
+    }
+    return true;
+  },
   'remove-member': async (args, msgId, _state, _openId, { chatId, chatType, mentions } = {}) => {
     if (chatType !== 'group' || !chatId) {
       await replyMessage(msgId, '只能在群聊中使用 /remove-member');
@@ -707,6 +750,7 @@ async function handleCommand(cmd, args, msgId, state, openId, context = {}) {
         '/remove-member @用户 — 预览要移除的群成员',
         '/remove-member confirm @用户 — 移除群成员',
         '/set-bot-admin — 将当前机器人设为群管理员',
+        '/set-log-chat — 将本群设为管理员日志群（留痕/踢出卡片发到这里）',
         '/moderation — 查看消息审核配置',
       ].join('\n'));
       return true;
@@ -985,9 +1029,36 @@ async function runAgentQuery(prompt, msgId, state) {
 // window. Deduplicate by message_id at the entry point so retries cannot run
 // moderation, Codex, file handling, or replies twice. The same protection also
 // prevents duplicate moderation audits/recalls.
+// 去重记录持久化到磁盘：飞书对未 ACK 事件的重投递可持续数小时（实测 8 小时后仍在重投，
+// 且常发生在电脑睡眠唤醒、WS 重连之后），仅靠内存缓存在进程重启后失效，必须以磁盘为准。
 const eventSeen = new Map();
-const EVENT_SEEN_LIMIT = 10000;
-const EVENT_SEEN_TTL_MS = 10 * 60 * 1000;
+const EVENT_SEEN_LIMIT = 50000;
+const EVENT_SEEN_TTL_MS = 24 * 60 * 60 * 1000;
+const SEEN_EVENTS_FILE = join(BOT_HOME, 'seen-events.json');
+
+async function loadSeenEvents() {
+  try {
+    const saved = JSON.parse(await readFile(SEEN_EVENTS_FILE, 'utf-8'));
+    let restored = 0;
+    for (const { id, ts } of Array.isArray(saved) ? saved : []) {
+      if (id && ts && Date.now() - ts < EVENT_SEEN_TTL_MS) { eventSeen.set(id, ts); restored++; }
+    }
+    if (restored) log('ok', 'dedup', `restored ${restored} seen message id(s)`);
+  } catch {}
+}
+await loadSeenEvents();
+
+let seenFlushTimer = null;
+function scheduleSeenFlush() {
+  if (seenFlushTimer) return;
+  seenFlushTimer = setTimeout(async () => {
+    seenFlushTimer = null;
+    const data = [...eventSeen.entries()].map(([id, ts]) => ({ id, ts }));
+    await writeFile(SEEN_EVENTS_FILE, JSON.stringify(data)).catch(() => {});
+  }, 5000);
+  seenFlushTimer.unref?.();
+}
+
 function isDuplicateEvent(messageId) {
   if (!messageId) return false;
   const now = Date.now();
@@ -1001,6 +1072,7 @@ function isDuplicateEvent(messageId) {
 
   if (eventSeen.has(messageId)) return true;
   eventSeen.set(messageId, now);
+  scheduleSeenFlush();
   if (eventSeen.size > EVENT_SEEN_LIMIT) {
     const oldestId = eventSeen.keys().next().value;
     eventSeen.delete(oldestId);
@@ -1010,6 +1082,9 @@ function isDuplicateEvent(messageId) {
 
 // ---- 飞书事件 ----
 const noop = async () => {};
+
+// 消息事件串行处理队列：见 im.message.receive_v1 handler 内注释（快速 ACK，防重投递）
+let messageEventQueue = Promise.resolve();
 const eventDispatcher = new lark.EventDispatcher({}).register({
   'im.message.receive_v1': async (data) => {
     const rawMsg = data?.message;
@@ -1025,6 +1100,26 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
       return;
     }
 
+    // 历史消息丢弃：飞书 WS 在重连/重启后会重投递未确认的旧事件，只处理“新”消息
+    // （超过 5 分钟的按历史对待——不判定、不撤回、不计数）
+    const STALE_EVENT_MAX_AGE_MS = 5 * 60 * 1000;
+    // 兼容秒（10 位）/毫秒（13 位）两种时间戳；取不到时放行并留痕，
+    // 由持久化去重（seen-events.json）兜底跨进程/长延迟重投递
+    const rawCreateTime = Number(msg.create_time);
+    const msgCreateTime = rawCreateTime >= 1e12 ? rawCreateTime : rawCreateTime > 0 ? rawCreateTime * 1000 : 0;
+    if (!msgCreateTime) {
+      log('warn', 'drop', `event without usable create_time msg=${msgId?.slice(-8)} — 依赖持久化去重兜底`);
+    } else if (Date.now() - msgCreateTime > STALE_EVENT_MAX_AGE_MS) {
+      const age = Math.round((Date.now() - msgCreateTime) / 1000);
+      log('info', 'drop', `stale event msg=${msgId?.slice(-8)} age=${age}s — 忽略历史消息，不判定不撤回`);
+      return;
+    }
+
+    // 快速 ACK：SDK 只在 handler 的 Promise 完结后才发送 ACK 响应帧。此前 AI 审核/撤回等
+    // 耗时逻辑把 ACK 拖到数十秒后甚至进程重启，飞书判定投递失败后错峰重投递同一事件
+    // （实测 8 小时后仍在重投；电脑睡眠唤醒后，下午的旧事件在凌晨集中涌入 → “幽灵撤回”风暴）。
+    // 这里把耗时处理串行入队后立即返回，ACK 秒回；队列按到达顺序串行执行。
+    messageEventQueue = messageEventQueue.then(async () => {
     // Authorization must happen before message content is logged or attachments are downloaded.
     if (!isAllowed(openId, msg.chat_id, msg.chat_type)) {
       log('warn', 'block', `${name} (${openId}) chat=${msg.chat_id?.slice(-8) || 'p2p'} not in contacts`);
@@ -1041,21 +1136,27 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
       (MODERATION_ALL_GROUPS && msg.chat_type === 'group') ||
       contactsCache.chatIds.has(msg.chat_id);
     if (shouldModerateGroup && data.sender?.sender_type === 'user') {
-      const blocked = await moderateMessage({
-        text: extractMessageText(data),
-        messageId: msgId,
-        chatId: msg.chat_id,
-        chatType: msg.chat_type,
-        senderType: data.sender?.sender_type,
-        senderOpenId: openId,
-        recall: recallMessage,
-        sendRecallNotice: async (message) => sendChatMessage(msg.chat_id, message),
-        notifyAdmin: contactsCache.adminOpenId
-          ? async (message) => sendDirectMessage(contactsCache.adminOpenId, message)
-          : undefined,
-        log,
-      });
-      if (blocked) return;
+      // 机器人管理员/群主/群管理员豁免（与 ad-recall 同源；群信息不可用时也保守豁免，避免误撤）
+      if (openId === contactsCache.adminOpenId || await isRecallExempt(msg.chat_id, openId)) {
+        log('dim', 'moderation', `skip (whitelist: 群管理员/群主) msg=${msgId?.slice(-8)} from=${name}(${openId.slice(-8)})`);
+      } else {
+        const blocked = await moderateMessage({
+          text: extractMessageText(data),
+          messageId: msgId,
+          chatId: msg.chat_id,
+          chatType: msg.chat_type,
+          senderType: data.sender?.sender_type,
+          senderOpenId: openId,
+          recall: recallMessage,
+          // 撤回警告统一用警示卡片（带底部灰色小字）；不再发“几行文字”式纯文本通知
+          sendRecallNotice: async (classification) => sendCardMessage(msg.chat_id, buildRecallNoticeCard(moderationReasonLabel(classification))),
+          notifyAdmin: contactsCache.adminOpenId
+            ? async (message) => sendDirectMessage(contactsCache.adminOpenId, message)
+            : undefined,
+          log,
+        });
+        if (blocked) return;
+      }
     }
 
     // 自动广告撤回：将群消息传入分级识别（strong_ad → 撤回；weak_ad → 提醒+上报；normal → 放行）
@@ -1143,6 +1244,17 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
       if (handled) return;
     }
 
+    // 群聊“仅 @ 才回复”：审核（moderateMessage）与广告撤回（handleAdMessage）在上方
+    // 已对所有群消息执行完毕，不受此处拦截影响；私聊与 /command 指令同样不受影响。
+    if (
+      msg.chat_type === 'group' &&
+      REPLY_POLICY.groupRequireMention &&
+      !(await isBotMentioned(mentions)) &&
+      !(REPLY_POLICY.groupSessionFollowUp && rootId && getSession(rootId))
+    ) {
+      log('dim', 'reply', `skip (bot not @-mentioned) msg=${msgId.slice(-8)} chat=${msg.chat_id?.slice(-8)}`);
+      return;
+    }
     let state;
     let topicOriginContext = ''; // topic 原始消息上下文
     if (rootId) {
@@ -1189,11 +1301,34 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
         log('ok', 'file', `thread attachments preserved (${state.attachments?.length || 0} files in session)`);
       })
       .catch(err => log('error', 'fatal', err.message?.slice(0, 200)));
+    })
+      // 队列级兜底：单条消息处理异常不能让串行队列断链（否则后续所有消息都不再处理）
+      .catch(err => log('error', 'event', `queue process failed msg=${msgId?.slice(-8)}: ${err.message?.slice(0, 200)}`));
   },
   // 新成员入群事件：为广告撤回模块提供“入群时间 < 24 小时”的新人判定依据
   // （需在飞书开放平台为应用订阅 im.chat.member.user.added_v1 事件）
   'im.chat.member.user.added_v1': async (data) => {
     noteMemberJoined(data);
+  },
+  // 踢出确认卡片的按钮回调；操作者必须是 bot 管理员（contacts.md Admin）
+  'card.action.trigger': async (data) => {
+    try {
+      const operatorId = data?.operator?.open_id || '';
+      const operatorName = data?.operator?.nick_name || operatorId.slice(-8);
+      const value = data?.action?.value || {};
+      if (value.adk !== 'kick' && value.adk !== 'ignore') return; // 非本模块卡片，忽略
+      // 裁决人：bot 管理员，或管理员日志群内的成员/群管理员（工作人员在日志群里点卡片裁决）
+      if (!(await isKickAdjudicator(operatorId))) {
+        log('warn', 'ad-recall', `卡片操作被拒绝：非 bot 管理员/日志群工作人员 operator=${operatorId?.slice(-8)}`);
+        return { toast: { type: 'error', content: '仅 bot 管理员或日志群工作人员可操作' } };
+      }
+      const result = await handleKickCardAction({ caseId: value.caseId, action: value.adk, operatorOpenId: operatorId, operatorName });
+      log(result.ok ? 'ok' : 'warn', 'ad-recall', `卡片操作 ${value.adk} case=${String(value.caseId).slice(-6)} → ${result.msg}`);
+      return { toast: { type: result.ok ? 'success' : 'error', content: result.msg } };
+    } catch (err) {
+      log('error', 'ad-recall', `卡片回调异常: ${err.message?.slice(0, 200)}`);
+      return { toast: { type: 'error', content: '处理异常，请查看日志' } };
+    }
   },
   'im.message.reaction.created_v1': noop,
   'im.message.reaction.deleted_v1': noop,

@@ -18,4 +18,4 @@ Set the administrator's real Feishu open ID below. Replace the placeholder befor
 
 ### 测试群
 
-- chat_id: oc_7f393ba3464dfe51af51d02bd2271c7c
+

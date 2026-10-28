@@ -17,6 +17,18 @@ export function getClient() {
   return client;
 }
 
+let botOpenIdCache = '';
+/**
+ * 获取机器人自身 open_id（GET /open-apis/bot/v3/info），用于判断群消息是否 @ 了本机器人。
+ * 结果缓存；失败返回空串，调用方按“未被 @”处理，宁可漏回不误回。
+ */
+export async function getBotOpenId() {
+  if (botOpenIdCache) return botOpenIdCache;
+  const resp = await getClient().request({ url: '/open-apis/bot/v3/info', method: 'GET' });
+  if (resp?.bot?.open_id) botOpenIdCache = resp.bot.open_id;
+  return botOpenIdCache;
+}
+
 // 飞书 text 消息不渲染 markdown：发送前把常见 markdown 语法降级为可读纯文本
 function toPlainText(text) {
   if (typeof text !== 'string' || !text) return text;
@@ -81,6 +93,29 @@ export async function replyMessage(messageId, text) {
     },
   });
   return { messageId: resp.data.message_id };
+}
+
+/**
+ * 发送交互卡片。receiveIdType: 'chat_id'（群）或 'open_id'（单聊管理员）。
+ */
+export async function sendCardMessage(receiveId, card, receiveIdType = 'chat_id') {
+  if (receiveIdType === 'chat_id' && !receiveId?.startsWith('oc_')) throw new Error('invalid chat_id');
+  const resp = await getClient().im.message.create({
+    params: { receive_id_type: receiveIdType },
+    data: { receive_id: receiveId, msg_type: 'interactive', content: JSON.stringify(card) },
+  });
+  return { messageId: resp.data.message_id };
+}
+
+/**
+ * 更新已发送卡片内容（按钮点击后原地改状态，防重复操作）。
+ */
+export async function updateCardMessage(messageId, card) {
+  const resp = await getClient().im.message.patch({
+    path: { message_id: messageId },
+    data: { content: JSON.stringify(card) },
+  });
+  return resp?.data || {};
 }
 
 /**
