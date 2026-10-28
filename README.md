@@ -67,6 +67,15 @@ Ad recall classifies group messages into `strong_ad` (auto-recalled), `weak_ad` 
 3. Repeat offenders trigger a confirmation card to `adminLogChatId` (falls back to the admin DM when empty): 3 recalls within 10 minutes or 8 within 24 hours — strong-ad recalls and brake triggers both count. The bot never kicks on its own; removal happens only when the contacts.md admin taps "移出群聊" on the card. This requires the card-interaction capability and the `card.action.trigger` event subscription. Ignoring a case dismisses that card only and keeps the counters. Group owners/admins and the bot admin never enter the kick flow.
 4. When a message is recalled, the bot posts a short reason notice in that group (no message content). The admin log chat carries only kick confirmation cards; recall, brake, and failure events stay in local logs. Group-owner/admin exemption fails safe: if group facts cannot be fetched, the message is exempt rather than recalled. Message events older than five minutes are treated as stale and dropped — Feishu redelivers unacked events after restarts, and history is never re-judged or recalled.
 
+## Group vote control
+
+Only the group owner, group administrators, and the contacts.md bot admin may start a group vote. Any other member's vote message (`msg_type=vote`) is recalled automatically, and the bot posts a notice card in that group explaining the restriction.
+
+- Reuses the ad-recall chat coverage (`allGroups` / allowed chats / `excludedChats`) and the same group-facts admin cache.
+- Toggle with `voteControl.enabled` in `config/ad-recall.json` (defaults to `true`).
+- Recalling another member's message requires the bot to be the group owner, administrator, or creator; failures are logged with the Feishu error code (e.g. 230026).
+- If group facts cannot be fetched, the vote is exempt (never recalled) — fail-safe, same as the recall whitelist.
+
 ## Group reply policy
 
 In group chats the bot only answers when @-mentioned (`config/reply-policy.json`, synced with git). Moderation and ad recall still run on **every** group message; direct messages and `/commands` are unaffected.

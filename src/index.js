@@ -8,7 +8,7 @@ import { replyMessage, addReaction, deleteReaction, extractMessageText, extractA
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
 import { initModeration, moderateMessage, getModerationStatus, moderationReasonLabel } from './moderation.js';
-import { initAdRecall, isAdRecallCandidate, handleAdMessage, noteMemberJoined, isRecallExempt, handleKickCardAction, setAdminLogChat, buildRecallNoticeCard, isKickAdjudicator } from './ad-recall.js';
+import { initAdRecall, isAdRecallCandidate, handleAdMessage, noteMemberJoined, isRecallExempt, handleKickCardAction, setAdminLogChat, buildRecallNoticeCard, isKickAdjudicator, handleVoteMessage } from './ad-recall.js';
 
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
@@ -1127,6 +1127,21 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
     }
 
     log('info', 'debug', `type=${msgType} content_length=${(rawMsg?.content || '').length}`);
+
+    // 群投票管控：仅群主/群管理员可发起群投票（msg_type=vote，content 为 {"topic","options"}），
+    // 非群主/管理员发起 → 撤回并群内提醒。投票消息不进入审核/AI 链路。
+    if (msgType === 'vote') {
+      await handleVoteMessage({
+        messageId: msgId,
+        chatId: msg.chat_id,
+        chatType: msg.chat_type,
+        senderOpenId: openId,
+        senderName: name,
+        senderType: data.sender?.sender_type,
+        rawContent: rawMsg?.content || '',
+      });
+      return;
+    }
 
     // Group moderation runs after chat authorization, but before attachments are
     // downloaded or the message is handed to Codex. By default only explicitly
