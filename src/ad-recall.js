@@ -51,6 +51,9 @@ let config = {
   brakeLimit: 3,
   chatFactsTtlMs: 5 * 60 * 1000,
   excludedChats: [],
+  voteControl: {
+    enabled: true,
+  },
   kick: {
     enabled: false,
     burstThreshold: 3,
@@ -106,6 +109,9 @@ export function initAdRecall({ log = () => {}, appId = '', adminOpenId = '', isC
     brakeWindowMs: Number(fileConfig.brakeWindowMs) || 5 * 60 * 1000,
     brakeLimit: Number(fileConfig.brakeLimit) || 3,
     excludedChats: Array.isArray(fileConfig.excludedChats) ? fileConfig.excludedChats.filter(c => typeof c === 'string' && c.startsWith('oc_')) : [],
+    voteControl: {
+      enabled: fileConfig.voteControl?.enabled !== false,
+    },
     kick: {
       enabled: fileConfig.kick?.enabled === true,
       burstThreshold: Number(fileConfig.kick?.burstThreshold) || 3,
@@ -117,7 +123,7 @@ export function initAdRecall({ log = () => {}, appId = '', adminOpenId = '', isC
   };
   log('info', 'ad-recall', `initialized enabled=${config.enabled} allGroups=${ctx.allGroups} ` +
     `whitelistDomains=${config.domainWhitelist.length} internalTerms=${config.internalTerms.length} ` +
-    `marketingWords=${config.marketingWords.length} ` +
+    `marketingWords=${config.marketingWords.length} voteControl=${config.voteControl.enabled} ` +
     `adminLog=${ctx.adminLogChatId ? ctx.adminLogChatId.slice(-8) : (adminOpenId ? 'admin-dm' : 'NONE')}`);
   log('info', 'ad-recall',
     '新人判定依赖 im.chat.member.user.added_v1 事件（需在开放平台订阅），未收到入群事件的成员按非新人处理');
@@ -423,6 +429,59 @@ export async function isKickAdjudicator(openId) {
   const facts = await getChatFacts(ctx.adminLogChatId);
   if (!facts.ok) return false;
   return facts.memberNames.has(openId) || facts.adminUserIds.has(openId);
+}
+
+// ---------- 群投票管控（vote control） ----------
+// 仅群主/群管理员（及 bot 管理员）可在群内发起投票；其他人发起的 vote 消息 → 撤回 + 群内提醒。
+// 与广告撤回共用：群覆盖范围（allGroups/allowed chats/excludedChats）、群信息缓存（管理员名单）、
+// 撤回接口与提醒卡片。bot 需为群主/管理员/创建者才能撤回他人消息，否则以飞书 API 报错码留痕。
+export function isVoteControlCandidate({ chatType, senderType, chatId }) {
+  return config.voteControl.enabled
+    && chatType === 'group'
+    && senderType === 'user'
+    && !!chatId
+    && !config.excludedChats.includes(chatId)
+    && (ctx.allGroups || ctx.isChatAllowed(chatId));
+}
+
+/**
+ * 处理一条群投票消息（msg_type=vote，content 为 {"topic","options"}）。
+ * 返回 true 表示已被本模块接管（调用方应终止后续流程）；false 表示放行或功能未覆盖。
+ */
+export async function handleVoteMessage({
+  messageId, chatId, chatType, senderOpenId, senderName = '', senderType, rawContent = '',
+}) {
+  if (!isVoteControlCandidate({ chatType, senderType, chatId })) return false;
+
+  let topic = '';
+  try { topic = JSON.parse(rawContent)?.topic || ''; } catch {}
+
+  // 豁免：bot 管理员；群主/群管理员（群信息不可用时保守豁免，宁可不撤，不冒误撤管理员的险）
+  if (senderOpenId && senderOpenId === ctx.adminOpenId) {
+    ctx.log('dim', 'vote', `放行（bot管理员）msg=${messageId?.slice(-8)} from=${senderOpenId?.slice(-8)}`);
+    return false;
+  }
+  if (await isRecallExempt(chatId, senderOpenId)) {
+    ctx.log('dim', 'vote', `放行（群主/群管理员）msg=${messageId?.slice(-8)} from=${senderOpenId?.slice(-8)}`);
+    return false;
+  }
+
+  ctx.log('info', 'vote', `非群主/管理员发起投票 from=${senderName}(${senderOpenId?.slice(-8)}) msg=${messageId?.slice(-8)} topic="${summarize(topic, 40)}" → 撤回`);
+
+  const result = await recallMessageDetailed(messageId);
+  if (!result.ok) {
+    const known = RECALL_ERROR_HINTS[result.code];
+    ctx.log('error', 'vote', `撤回投票失败 msg=${messageId} code=${result.code}${known ? ` (${known})` : ''} ${result.msg?.slice(0, 150)}`);
+    return true;
+  }
+
+  ctx.log('ok', 'vote', `已撤回投票 msg=${messageId} sender=${senderName}(${senderOpenId?.slice(-8)}) topic="${summarize(topic, 40)}"`);
+  try {
+    await sendCardMessage(chatId, buildRecallNoticeCard('群投票仅限群主或群管理员发起，如有需要请联系群管理员', '🗳️ 投票已被撤回'));
+  } catch (err) {
+    ctx.log('warn', 'vote', `投票撤回提醒卡片发送失败 msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 150)}`);
+  }
+  return true;
 }
 
 // ---------- 管理员日志群：只发送踢出确认卡片，不再推送撤回/刹车类文本留痕 ----------

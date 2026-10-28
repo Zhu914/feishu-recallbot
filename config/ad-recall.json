@@ -11,6 +11,9 @@
   "newcomerHours": 24,
   "brakeWindowMs": 300000,
   "brakeLimit": 3,
+  "voteControl": {
+    "enabled": true
+  },
   "kick": {
     "enabled": true,
     "burstThreshold": 3,
