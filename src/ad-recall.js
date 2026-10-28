@@ -32,6 +32,7 @@ const REASON_LABELS = {
   solitaire: '发起接龙（本群禁止）',
   profanity: '包含辱骂性词汇',
   gray_profanity: '包含不友善词汇，请注意言辞',
+  moderation: 'AI 审核违规（撤回）',
 };
 
 const DEFAULT_DOMAIN_WHITELIST = 'feishu.cn,feishu.com,larksuite.com,larkoffice.com';
@@ -733,7 +734,7 @@ function buildKickCardResolved(kase) {
 }
 
 // 撤回成功 / 刹车触发后调用：双窗口计数 → 达阈值弹管理员确认卡片（绝不自动踢）
-async function noteViolationAndMaybeAsk({ chatId, senderOpenId, senderName = '', reason, text }) {
+export async function noteViolationAndMaybeAsk({ chatId, senderOpenId, senderName = '', reason, text }) {
   try {
     if (!config.kick.enabled || !chatId || !senderOpenId?.startsWith('ou_')) return;
     if (senderOpenId === ctx.adminOpenId) return;          // bot 管理员永不进入踢出流程

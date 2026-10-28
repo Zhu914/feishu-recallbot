@@ -8,7 +8,7 @@ import { replyMessage, addReaction, deleteReaction, extractMessageText, extractA
 
 import { startScheduler, reloadScheduler } from './scheduler.js';
 import { initModeration, moderateMessage, getModerationStatus, moderationReasonLabel } from './moderation.js';
-import { initAdRecall, isAdRecallCandidate, handleAdMessage, noteMemberJoined, isRecallExempt, handleKickCardAction, setAdminLogChat, buildRecallNoticeCard, isKickAdjudicator, handleVoteMessage } from './ad-recall.js';
+import { initAdRecall, noteViolationAndMaybeAsk, isAdRecallCandidate, handleAdMessage, noteMemberJoined, isRecallExempt, handleKickCardAction, setAdminLogChat, buildRecallNoticeCard, isKickAdjudicator, handleVoteMessage } from './ad-recall.js';
 
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
@@ -1180,6 +1180,7 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
       if (openId === contactsCache.adminOpenId || await isRecallExempt(msg.chat_id, openId)) {
         log('dim', 'moderation', `skip (whitelist: 群管理员/群主) msg=${msgId?.slice(-8)} from=${name}(${openId.slice(-8)})`);
       } else {
+        let moderationRecalled = false; // AI 审核实际撤回成功时置位；失败/低置信/降级不计入踢出计数
         const blocked = await moderateMessage({
           text: extractMessageText(data),
           messageId: msgId,
@@ -1187,7 +1188,7 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
           chatType: msg.chat_type,
           senderType: data.sender?.sender_type,
           senderOpenId: openId,
-          recall: recallMessage,
+recall: async (mid) => { await recallMessage(mid); moderationRecalled = true; },
           // 撤回/提醒卡片统一改为「话题内回复」（root 优先，已撤回消息回复失败时降级群发），不再单独刷屏
           sendRecallNotice: async (classification) => {
             try {
@@ -1210,7 +1211,13 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
             : undefined,
           log,
         });
-        if (blocked) return;
+        if (blocked) {
+          // AI 审核撤回成功 → 与广告撤回同源，计入踢出双窗口（10分钟3次/24小时8次）
+          if (moderationRecalled) {
+            await noteViolationAndMaybeAsk({ chatId: msg.chat_id, senderOpenId: openId, senderName: name, reason: 'moderation', text: extractMessageText(data) });
+          }
+          return;
+        }
       }
     }
 
