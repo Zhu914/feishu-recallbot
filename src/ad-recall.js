@@ -76,6 +76,7 @@ let config = {
     dailyThreshold: 8,
     dailyWindowMs: 24 * 3600 * 1000,
     maxPendingCases: 10,
+    pendingExpireMs: 3600000,
   },
 };
 
@@ -143,6 +144,7 @@ export function initAdRecall({ log = () => {}, appId = '', adminOpenId = '', isC
       dailyThreshold: Number(fileConfig.kick?.dailyThreshold) || 8,
       dailyWindowMs: Number(fileConfig.kick?.dailyWindowMs) || 24 * 3600 * 1000,
       maxPendingCases: Number(fileConfig.kick?.maxPendingCases) || 10,
+      pendingExpireMs: Number(fileConfig.kick?.pendingExpireMs) || 3600000,
     },
   };
   log('info', 'ad-recall', `initialized enabled=${config.enabled} allGroups=${ctx.allGroups} ` +
@@ -719,15 +721,18 @@ function buildKickCard(kase) {
 
 function buildKickCardResolved(kase) {
   const kicked = kase.status === 'kicked';
+  const expired = kase.status === 'expired';
   return {
     config: { wide_screen_mode: true },
-    header: { template: kicked ? 'green' : 'grey', title: { tag: 'plain_text', content: kicked ? '✅ 已移出群聊' : '⚪ 已忽略' } },
+    header: { template: kicked ? 'green' : 'grey', title: { tag: 'plain_text', content: kicked ? '✅ 已移出群聊' : expired ? '⏰ 已超时失效' : '⚪ 已忽略' } },
     elements: [
       ...kickCardSections(kase),
       { tag: 'hr' },
       { tag: 'div', text: { tag: 'lark_md', content: kicked
         ? `✅ **已移出群聊** · 处理人：${kase.resolvedBy} · ${fmtViolationTs(kase.resolvedAt)}`
-        : `⚪ **已忽略（仅本次，计数保留）** · 处理人：${kase.resolvedBy} · ${fmtViolationTs(kase.resolvedAt)}` } },
+        : expired
+          ? `⏰ **超时未处理自动失效（计数保留）** · ${fmtViolationTs(kase.resolvedAt)} · 该用户再次达阈值会重新弹卡`
+          : `⚪ **已忽略（仅本次，计数保留）** · 处理人：${kase.resolvedBy} · ${fmtViolationTs(kase.resolvedAt)}` } },
     ],
   };
 }
@@ -750,6 +755,16 @@ async function noteViolationAndMaybeAsk({ chatId, senderOpenId, senderName = '',
     if (burst < config.kick.burstThreshold && daily < config.kick.dailyThreshold) return;
     for (const c of kickCases.values()) {
       if (c.targetOpenId === senderOpenId && c.status === 'pending') {
+        // 卡片超时未处理（默认 1 小时）→ 自动失效：计数保留、旧卡更新为超时样式，允许本次重新弹新卡
+        if (Date.now() - c.createdAt >= config.kick.pendingExpireMs) {
+          c.status = 'expired';
+          c.resolvedAt = Date.now();
+          c.resolvedBy = 'system（超时失效）';
+          persistKickCases();
+          ctx.log('warn', 'ad-recall', `踢出卡片超时未处理自动失效 case=${c.id}，达阈值重新弹卡`);
+          await updateCardMessageSafe(c);
+          break; // 继续走下方弹新卡流程
+        }
         ctx.log('info', 'ad-recall', `踢出确认卡片待处理中（case=${c.id}），新违规仅记录`);
         return;
       }
@@ -790,7 +805,10 @@ export async function handleKickCardAction({ caseId, action, operatorOpenId, ope
   const kase = kickCases.get(caseId);
   const who = operatorName || operatorOpenId?.slice(-8) || '';
   if (!kase) return { ok: false, msg: '案例不存在（bot 可能重启过），请人工处理' };
-  if (kase.status !== 'pending') return { ok: true, msg: `该案例已处理（${kase.status === 'kicked' ? '已移出' : '已忽略'}）` };
+  if (kase.status !== 'pending') {
+    const label = kase.status === 'kicked' ? '已移出' : kase.status === 'expired' ? '已超时失效，请处理重新弹出的新卡片' : '已忽略';
+    return { ok: true, msg: `该案例已处理（${label}）` };
+  }
 
   if (action === 'ignore') {
     kase.status = 'ignored';

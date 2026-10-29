@@ -188,7 +188,7 @@ ${knowledgeContext}
 ---
 
 ## 输出规则
-生成的所有可返回文件必须保存到 outputs/ 目录，文件名包含主题和日期。禁止部署到外部仓库。用用户消息的主要语言回复，只输出最终结论和必要的下一步。
+生成的所有可返回文件必须保存到 outputs/ 目录，文件名包含主题和日期。禁止部署到外部仓库。无论用户消息是什么语言（包括英文如 hi/hello），一律用简体中文回复，只输出最终结论和必要的下一步。
 
 ---
 
@@ -294,7 +294,8 @@ await loadSessions();
 const FEISHU_MSG_LIMIT = 8000;
 const HTML_OUTPUT_THRESHOLD = 3000; // 超过此长度自动转 HTML，不塞卡片
 const OUTPUTS_DIR = join(PROJECT_ROOT, 'outputs');
-const TYPING_EMOJI = 'Typing';
+// 任务执行中的消息表情：THINKING 🤔 思考脸（key 全大写才有效；备选 CAKE/BEER/OnIt/Typing）
+const TYPING_EMOJI = 'THINKING';
 
 // 列出某 outputs/ 目录下所有文件（相对路径集合），用于识别本次会话新生成的文件
 async function listOutputFiles(outputsDir) {
