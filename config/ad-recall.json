@@ -32,6 +32,7 @@
     "burstWindowMs": 600000,
     "dailyThreshold": 8,
     "dailyWindowMs": 86400000,
-    "maxPendingCases": 10
+    "maxPendingCases": 10,
+    "pendingExpireMs": 3600000
   }
 }
