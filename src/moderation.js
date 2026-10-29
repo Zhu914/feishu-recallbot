@@ -2,7 +2,7 @@
 // Codex is used as an ephemeral, read-only JSON classifier.
 
 import { appendFile, mkdir } from 'fs/promises';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, mkdirSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -71,12 +71,23 @@ function resolveAuditFile(value) {
 }
 
 let createdModerationCwd = '';
+process.on('exit', () => {
+  try { if (createdModerationCwd) rmSync(createdModerationCwd, { recursive: true, force: true }); } catch {}
+});
+// 工作目录位于系统临时目录，可能被磁盘清理等外部因素删除 → spawn 前检测，丢了就重建（否则 spawn ENOENT、审核降级放行）
+function ensureModerationCwd(log = () => {}) {
+  if (process.env.MODERATION_CODEX_CWD) {
+    try { mkdirSync(config.cwd, { recursive: true }); } catch {}
+    return config.cwd;
+  }
+  if (createdModerationCwd && existsSync(createdModerationCwd)) return createdModerationCwd;
+  createdModerationCwd = mkdtempSync(join(tmpdir(), 'feishu-moderation-'));
+  log('warn', 'moderation', `工作目录被系统清理，已重建: ${createdModerationCwd}`);
+  return createdModerationCwd;
+}
 function createModerationCwd() {
   if (process.env.MODERATION_CODEX_CWD) return resolveFromProject(process.env.MODERATION_CODEX_CWD);
   createdModerationCwd = mkdtempSync(join(tmpdir(), 'feishu-moderation-'));
-  process.on('exit', () => {
-    try { rmSync(createdModerationCwd, { recursive: true, force: true }); } catch {}
-  });
   return createdModerationCwd;
 }
 
@@ -261,7 +272,7 @@ async function classifyWithCodex(text, log) {
     try {
       for await (const event of runCodexQuery({
         prompt: buildModerationPrompt(text),
-        cwd: config.cwd,
+        cwd: ensureModerationCwd(log),
         abortController,
         model: config.model,
         sandboxMode: 'read-only',

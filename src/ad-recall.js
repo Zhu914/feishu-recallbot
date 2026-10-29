@@ -30,7 +30,7 @@ const REASON_LABELS = {
   duplicate_burst: '5分钟内相同文本发送≥3次',
   marketing_newcomer: '营销词汇+入群不足24小时',
   solitaire: '发起接龙（本群禁止）',
-  profanity: '包含辱骂性词汇',
+  profanity: '包含不文明发言',
   gray_profanity: '包含不友善词汇，请注意言辞',
   moderation: 'AI 审核违规（撤回）',
 };
@@ -123,7 +123,7 @@ export function initAdRecall({ log = () => {}, appId = '', adminOpenId = '', isC
     duplicateThreshold: Number(fileConfig.duplicateThreshold) || 3,
     newcomerMs: (Number(fileConfig.newcomerHours) || 24) * 3600 * 1000,
     brakeWindowMs: Number(fileConfig.brakeWindowMs) || 5 * 60 * 1000,
-    brakeLimit: Number(fileConfig.brakeLimit) || 3,
+    brakeLimit: fileConfig.brakeLimit === 0 ? 0 : (Number(fileConfig.brakeLimit) || 3), // 0 = 关闭安全刹车
     excludedChats: Array.isArray(fileConfig.excludedChats) ? fileConfig.excludedChats.filter(c => typeof c === 'string' && c.startsWith('oc_')) : [],
     profanity: {
       enabled: fileConfig.profanity?.enabled === true,
@@ -609,9 +609,9 @@ export async function handleAdMessage({
   // ---- strong_ad ----
   const now = Date.now();
 
-  // 安全刹车：5 分钟内已实际撤回 ≥ 3 次 → 暂停自动撤回（仅记本地日志，不发日志群）
+  // 安全刹车：0=关闭；否则 5 分钟内已实际撤回 ≥ brakeLimit 次 → 暂停自动撤回（仅记本地日志，不发日志群）
   const brakeCount = countRecent(brakeHistory, senderOpenId, now, config.brakeWindowMs);
-  if (brakeCount >= config.brakeLimit) {
+  if (config.brakeLimit > 0 && brakeCount >= config.brakeLimit) {
     ctx.log('warn', 'ad-recall', `刹车触发：${senderOpenId?.slice(-8)} 5分钟内已撤回 ${brakeCount} 次，暂停自动撤回 msg=${messageId?.slice(-8)}`);
     // 刹车触发同样计入踢出计数（刷屏已确认，撤回虽已暂停）
     await noteViolationAndMaybeAsk({ chatId, senderOpenId, senderName, reason: verdict.reason, text });
