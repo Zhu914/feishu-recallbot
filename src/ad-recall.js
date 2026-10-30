@@ -33,6 +33,7 @@ const REASON_LABELS = {
   profanity: '包含不文明发言',
   gray_profanity: '包含不友善词汇，请注意言辞',
   moderation: 'AI 审核违规（撤回）',
+  vote: '发起群投票（仅群主/管理员可发起）',
 };
 
 const DEFAULT_DOMAIN_WHITELIST = 'feishu.cn,feishu.com,larksuite.com,larkoffice.com';
@@ -553,6 +554,8 @@ export async function handleVoteMessage({
   } catch (err) {
     ctx.log('warn', 'vote', `投票撤回提醒卡片发送失败 msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 150)}`);
   }
+  // 撤回成功 → 与其他违规同源计入踢出双窗口（管理员豁免在 noteViolationAndMaybeAsk 内部生效）
+  await noteViolationAndMaybeAsk({ chatId, senderOpenId, senderName, reason: 'vote', text: `群投票：${summarize(topic, 40)}` });
   return true;
 }
 
