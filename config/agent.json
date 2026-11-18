@@ -1,0 +1,10 @@
+{
+  "$comment": "Managed Agents 审核引擎配置（策略参数，随 git 同步）。key 不在这里：用环境变量 ZHIPUAI_API_KEY 或 .secrets/zhipu.key。Phase 0 实测：flashx + effort low 的 P95≈6s。",
+  "agentName": "moderation-classifier",
+  "environmentId": "env_01a19a33-a188-7206-8903-59eeddcb5731",
+  "model": { "id": "glm-5.3-flashx", "effort": { "type": "low" }, "speed": "standard" },
+  "sessionTitle": "moderation",
+  "pollIntervalMs": 500,
+  "sweepIntervalMs": 600000,
+  "sweepMaxAgeMs": 900000
+}

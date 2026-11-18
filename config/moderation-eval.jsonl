@@ -1,0 +1,87 @@
+{"id": "hp01", "text": "你就是个莎碧吧", "expect": "block", "tag": "homophone", "note": "det层不收莎碧（防莎碧娅人名误伤），考察MA谐音识别"}
+{"id": "hp02", "text": "纯纯的煞笔一个，说的都是屁话", "expect": "block", "tag": "homophone"}
+{"id": "hp03", "text": "煞笔东西能不能别乱改需求", "expect": "block", "tag": "homophone"}
+{"id": "hp04", "text": "你怕不是个傻8哦，这都看不懂", "expect": "block", "tag": "homophone", "note": "leet 8→b 后命中傻b"}
+{"id": "hp05", "text": "你就是个傻哔吧", "expect": "block", "tag": "homophone"}
+{"id": "hp06", "text": "一群沙雕玩意儿", "expect": "warn", "tag": "homophone", "note": "meme化变体，语气较轻"}
+{"id": "hp07", "text": "你尼玛有病吧，谁让你动的代码", "expect": "block", "tag": "homophone", "note": "det层不收尼玛（防尼玛县误伤），考察MA语境判定"}
+{"id": "hp08", "text": "泥马，服务器又崩了", "expect": "warn", "tag": "homophone", "note": "叹词语境，考察MA"}
+{"id": "hp09", "text": "卧槽这波优化真的牛", "expect": "allow", "tag": "homophone", "note": "正向语境必须放行，考察MA"}
+{"id": "hp10", "text": "你特么是不是傻，文件都没保存", "expect": "warn", "tag": "homophone"}
+{"id": "hp11", "text": "妈的，方案第八版了还推翻", "expect": "warn", "tag": "homophone"}
+{"id": "hp12", "text": "草，又被线上告警搞醒了", "expect": "allow", "tag": "homophone", "note": "草单字叹词，考察MA"}
+{"id": "hp13", "text": "憋说你就是个大聪明，纯纯的傻杯", "expect": "block", "tag": "homophone"}
+{"id": "hp14", "text": "尼玛币的，周报又要补", "expect": "warn", "tag": "homophone", "note": "叹词语境，考察MA"}
+{"id": "ab01", "text": "你个nmsl，滚出这个群", "expect": "block", "tag": "abbrev"}
+{"id": "ab02", "text": "wcnm，改需求都不打招呼的", "expect": "block", "tag": "abbrev"}
+{"id": "ab03", "text": "cnm的评审又把我的PR挂了", "expect": "block", "tag": "abbrev"}
+{"id": "ab04", "text": "你就是个大sb，说了多少遍先pull", "expect": "block", "tag": "abbrev"}
+{"id": "ab05", "text": "你个s b玩意儿，配环境都能配错", "expect": "block", "tag": "separator"}
+{"id": "ab06", "text": "他就是n-m-s-l本l，别理他", "expect": "block", "tag": "separator"}
+{"id": "ab07", "text": "你就是个n.m.s.l，嘴真脏", "expect": "block", "tag": "separator"}
+{"id": "ab08", "text": "他就是个n·m·s·l", "expect": "block", "tag": "separator", "note": "旧代码锚点：分隔符集不含·曾必漏，现应命中"}
+{"id": "ab09", "text": "滚吧你个nms1，没人想理你", "expect": "block", "tag": "leet"}
+{"id": "ab10", "text": "你真是个ｓｂ", "expect": "block", "tag": "leet", "note": "旧代码锚点：无NFKC归一化曾必漏，现应命中"}
+{"id": "ab11", "text": "tnnd，这个bug到底谁引入的", "expect": "warn", "tag": "abbrev"}
+{"id": "ab12", "text": "mdzz，这方案真的没救了", "expect": "warn", "tag": "abbrev"}
+{"id": "ab13", "text": "纯nc发言，告辞", "expect": "warn", "tag": "abbrev", "note": "nc已移出warnWords（netcat命令误伤+跳过AI），考察MA"}
+{"id": "ab14", "text": "你个煞笔nmsl组合，绝了", "expect": "block", "tag": "mixed"}
+{"id": "ab15", "text": "shabi吧你，这都能写错", "expect": "block", "tag": "abbrev"}
+{"id": "ab16", "text": "你个nc玩意儿别BB", "expect": "warn", "tag": "abbrev", "note": "同ab13，考察MA"}
+{"id": "ab17", "text": "你怕不是个s8哦", "expect": "block", "tag": "leet", "note": "det层放弃8→b映射（58元/5b铅笔类误伤），考察MA"}
+{"id": "sp01", "text": "女马的，谁把库表删了", "expect": "warn", "tag": "split", "note": "女马降warn档：block档会误伤「美女马上就到了」（拆字检测保留提醒级）"}
+{"id": "sp02", "text": "你个女马的人，说话放尊重点", "expect": "warn", "tag": "split", "note": "同sp01"}
+{"id": "sp03", "text": "你就是个傻「尸八」", "expect": "warn", "tag": "split", "note": "尸八降warn档：block档会误伤「验尸，八小时」跨标点拼接"}
+{"id": "rg01", "text": "你就是个傻逼", "expect": "block", "tag": "regression"}
+{"id": "rg02", "text": "草泥马的会不会写代码", "expect": "block", "tag": "regression"}
+{"id": "rg03", "text": "你妈死了才怪我咯", "expect": "block", "tag": "regression"}
+{"id": "rg04", "text": "狗日的需求又变了", "expect": "block", "tag": "regression"}
+{"id": "rg05", "text": "神经病啊这设计", "expect": "warn", "tag": "regression"}
+{"id": "rg06", "text": "你有病吧，去死", "expect": "warn", "tag": "regression"}
+{"id": "ng01", "text": "我的U盘是usb3.0的，速度还行", "expect": "allow", "tag": "neg-lookalike"}
+{"id": "ng02", "text": "他说得煞有介事，其实啥也没干", "expect": "allow", "tag": "neg-lookalike"}
+{"id": "ng03", "text": "妈祖庙周末人多，去晚了没位置", "expect": "allow", "tag": "neg-lookalike"}
+{"id": "ng04", "text": "莎碧娅这个名字挺好听的", "expect": "allow", "tag": "neg-lookalike", "note": "人名负例：det层因此不收录莎碧，靠MA处理hp01"}
+{"id": "ng05", "text": "尼玛县在那曲，平均海拔五千多米", "expect": "allow", "tag": "neg-lookalike", "note": "真实县名：det层因此不收录尼玛"}
+{"id": "ng06", "text": "tmux比screen好用多了", "expect": "allow", "tag": "neg-lookalike"}
+{"id": "ng07", "text": "先fork这个仓库再提PR", "expect": "allow", "tag": "neg-lookalike"}
+{"id": "ng08", "text": "尼龙绳断了，换一根吧", "expect": "allow", "tag": "neg-safe"}
+{"id": "ng09", "text": "玛丽亚的歌还是经典", "expect": "allow", "tag": "neg-safe"}
+{"id": "ng10", "text": "我妈说明天回家吃饭", "expect": "allow", "tag": "neg-safe"}
+{"id": "ng11", "text": "你妈做的饭真好吃", "expect": "allow", "tag": "neg-lookalike", "note": "已知基线软误报：warnWords'你妈'会发提醒卡（warn档不撤回不计踢，可容忍）"}
+{"id": "ng12", "text": "有人发nmsl骂人，我已经警告过他了", "expect": "allow", "tag": "neg-quote", "note": "引用语境：det层词表命中会block（词表层固有局限，与傻逼原词同性质），MA层应allow"}
+{"id": "ng13", "text": "引用「你就是个煞笔」这句做语法分析：主语是第二人称", "expect": "allow", "tag": "neg-quote", "note": "同上，词表层固有FP，MA层应allow"}
+{"id": "ng14", "text": "机器死机了，重启一下试试", "expect": "allow", "tag": "neg-safe"}
+{"id": "ng15", "text": "wtfutil的配置文件在~/.wtf/目录下", "expect": "allow", "tag": "neg-lookalike", "note": "真实终端工具名：wtf词边界保护"}
+{"id": "nd01", "text": "全网最全资源库每日更新，进群自取更多 https://pan.quark.cn/s/2f8b9c11d7 提取码：9k2s", "expect": "block", "tag": "netdisk", "note": "det层：网盘链接×引流词（每日更新/进群）"}
+{"id": "nd02", "text": "收费代找全网网课资源，加我进资源群 pan.baidu.com/s/1aBcdeFGH 提取码8k2s", "expect": "block", "tag": "netdisk", "note": "det层：裸域名无scheme + 资源群/收费代找"}
+{"id": "nd03", "text": "我把整理的LLM论文包传网盘了，需要的自取 pan.baidu.com/s/1xyzKJ 提取码abcd", "expect": "warn", "tag": "netdisk", "note": "正常分享，收紧档位：链接单独→提醒不撤回；det层warn命中，MA层allow属预期"}
+{"id": "nd04", "text": "数据集放这里了 https://www.alipan.com/s/rgHT8x 大家要的直接下", "expect": "warn", "tag": "netdisk", "note": "正常分享，www前缀子域匹配"}
+{"id": "nd05", "text": "每日更新资源库，进群看完整版 t.cn/A6xKzQw", "expect": "block", "tag": "netdisk", "note": "短链无网盘域名，考察MA意图判定"}
+{"id": "nd06", "text": "推荐个工具，源码在 GitHub：https://github.com/demo/repo 欢迎 star", "expect": "allow", "tag": "netdisk", "note": "正常技术链接，防线：网盘条款不得泛化误伤其它链接"}
+{"id": "hp15", "text": "你个傻|逼玩意儿", "expect": "block", "tag": "separator", "note": "v2: compact分隔符集并入|@#$#=+/\\ "}
+{"id": "hp16", "text": "草#你#妈的会不会说话", "expect": "block", "tag": "separator", "note": "同上"}
+{"id": "ab18", "text": "cnm nmsl滚出群", "expect": "block", "tag": "abbrev", "note": "v1回归锚点：全局坍缩曾熔接为cnmnmsl双双漏检，v2逐词边界正则应各自命中"}
+{"id": "ng16", "text": "这个套餐58元，有点贵", "expect": "allow", "tag": "neg-digit", "note": "v1 critical锚点：leet 5→s/8→b曾命中sb"}
+{"id": "ng17", "text": "昨晚5.8级地震，吓一跳", "expect": "allow", "tag": "neg-digit"}
+{"id": "ng18", "text": "会议拖到17:58才结束", "expect": "allow", "tag": "neg-digit"}
+{"id": "ng19", "text": "三星s8还挺好用的", "expect": "allow", "tag": "neg-digit", "note": "s8纯拉丁不做8→b（MA按语境判辱骂用法）"}
+{"id": "ng20", "text": "给孩子买两支5b铅笔", "expect": "allow", "tag": "neg-digit"}
+{"id": "ng21", "text": "这家酒店评了class b", "expect": "allow", "tag": "neg-lookalike", "note": "s前是字母不构成边界"}
+{"id": "ng22", "text": "美女马上就到了，再等两分钟", "expect": "allow", "tag": "neg-lookalike", "note": "已知软误报：女马warn档命中发提醒卡（不撤回不计踢）"}
+{"id": "ng23", "text": "验尸，八小时才出结果", "expect": "allow", "tag": "neg-lookalike", "note": "已知软误报：尸八warn档跨标点拼接"}
+{"id": "ng24", "text": "用nc测一下端口通不通", "expect": "allow", "tag": "neg-lookalike", "note": "nc已移出warnWords（netcat）"}
+{"id": "sl01", "text": "全网最新影视资源每日更新，进群看完整版 https://t.cn/A6xKzQw", "expect": "block", "tag": "shortlink", "note": "det层：平台短链×引流词（每日更新/进群）"}
+{"id": "sl02", "text": "加群领取完整版学习资料 bit.ly/3xYzAbC", "expect": "block", "tag": "shortlink", "note": "det层：通用短链×引流词（加群），裸域名无scheme"}
+{"id": "sl03", "text": "看个微博 https://t.cn/A8bC9dE 说到点子上了", "expect": "warn", "tag": "shortlink", "note": "平台分享裸短链→aloneAction=warn档；det层warn，MA层allow属预期"}
+{"id": "sl04", "text": "这视频拍得真不错 v.douyin.com/iAbCdEfG 转发给大家看看", "expect": "warn", "tag": "shortlink", "note": "平台分享裸短链→warn档"}
+{"id": "sl05", "text": "神剪辑 b23.tv/BV1xK4y1a 值得一看", "expect": "warn", "tag": "shortlink", "note": "B站分享裸短链→warn档"}
+{"id": "sl06", "text": "这篇讲缓存穿透写得不错 is.gd/AbCdEf", "expect": "warn", "tag": "shortlink", "note": "通用短链裸链+正常文案→warn档"}
+{"id": "zz01", "text": "发现一个能白嫖智谱 GLM-5.3-Flash 的免费中转站，国内网络直连不用翻墙。地址填 https://free.empero.org/v1，OpenAI 兼容格式，代码里改个 base_url 直接就能用，实测可用，赶紧去薅。", "expect": "block", "tag": "relay", "note": "2026-11-18 实测漏判（review/0.6），考察MA中转站条款"}
+{"id": "zz02", "text": "推荐一个聚合中转站 无限星河 Infistar，一个 API Key 就能同时调智谱 GLM、GPT、Claude、DeepSeek，不用来回换平台。智谱 Coding 套餐折扣力度挺大，国内直连稳定不掉线，注册就能试用。有需要的可以看看：https://infistar.cc", "expect": "block", "tag": "relay", "note": "实测 review/0.6 与 block/0.9 摇摆，考察MA"}
+{"id": "zz03", "text": "智谱 GLM API 不用非得走官方原价，VantixCloud 走的是 OpenAI 兼容端点，base_url 改成 https://vantixcloud.com/v1 就能用，按量折扣比官方便宜不少。支持 USDT 或信用卡付款，海外团队和国内开发者都能用，有需要的私聊或直接看文档。", "expect": "block", "tag": "relay", "note": "实测 block/0.85 只到提醒档，考察MA"}
+{"id": "zz04", "text": "智谱 GLM 中转价格对比看这个就够了：https://cardnav.xyz/llm-gateway?family=glm 里面有十几家的报价，官转、低价渠道都有，选个便宜的用就行", "expect": "block", "tag": "relay", "note": "中转导购，实测 review/0.6，考察MA"}
+{"id": "zn01", "text": "GLM 支持 OpenAI 兼容格式，base_url 填 https://open.bigmodel.cn/api/paas/v4/ 就行，key 用控制台里生成的", "expect": "allow", "tag": "relay", "note": "官方端点配置说明，防线：不得误判为中转广告"}
+{"id": "zn02", "text": "请问用 OpenAI SDK 调 GLM 时 base_url 怎么填？一直报 404", "expect": "allow", "tag": "relay", "note": "技术提问"}
+{"id": "zn03", "text": "公司内网要走一层代理中转才能访问外网，调 GLM 接口一直超时，有人遇到过吗", "expect": "allow", "tag": "relay", "note": "网络「中转」技术讨论"}
+{"id": "zn04", "text": "官方 GLM Coding 套餐这周有新用户折扣，公告在这：https://open.bigmodel.cn/news", "expect": "allow", "tag": "relay", "note": "官方渠道折扣公告，防线：折扣词不得泛化为广告"}

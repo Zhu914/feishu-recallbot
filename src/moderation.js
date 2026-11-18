@@ -1,21 +1,26 @@
 // AI-backed message moderation for approved Feishu group chats.
-// Codex is used as an ephemeral, read-only JSON classifier.
+// MA (Managed Agents) is used as an ephemeral JSON classifier: one fresh cloud
+// session per message, toolless agent, deleted right after the turn. See src/ma.js.
 
 import { appendFile, mkdir } from 'fs/promises';
-import { mkdtempSync, rmSync, mkdirSync, existsSync } from 'fs';
-import { tmpdir } from 'os';
+import { readFileSync } from 'fs';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { runCodexQuery } from './codex.js';
+import { judge as maJudge, initMa, getMaConfig } from './ma.js';
 
 const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DEFAULT_AUDIT_FILE = resolve(PROJECT_ROOT, 'logs/moderation-audit.jsonl');
-const MODERATION_SCHEMA_FILE = fileURLToPath(new URL('./moderation-schema.json', import.meta.url));
+const MODERATION_POLICY_FILE = resolve(PROJECT_ROOT, 'config/moderation.json');
 
 const DEFAULT_POLICY = [
   '拦截明确违法违规、严重辱骂或人身攻击、骚扰、色情低俗、暴力恐吓、垃圾广告、诈骗、泄露敏感个人信息的内容。',
+  '链接按意图判断：正常交流中的技术/资料分享链接（GitHub、博客、文档、新闻等）应 allow；导流、推销、兼职刷单、收费服务、博彩色情等链接属于垃圾广告，应 block。',
   '不确定但可能违规时返回 review，不直接 block。',
   '普通批评、抱怨、讽刺、玩笑、观点分歧，且没有攻击特定人或群体时返回 allow。',
+  '辱骂识别必须覆盖变形：谐音字（煞笔/傻哔/莎碧）、拼音或字母缩写（nmsl/cnm/wcnm/sb/shabi/wdnmd）、中英混写（傻b/傻8）、数字替换（nms1/s8）、符号分隔（s.b/n-m-s-l）、拆字（女马=妈）。变形指向辱骂且针对特定人时返回 block。',
+  '正常用法必须 allow：含近似字面的技术词（usb/接口）、材料词（纳米）、地名（尼玛县）、成语（煞有介事）等；引用、转述或讨论他人辱骂原文的场景（如「有人发nmsl骂人，我已警告过他」）也返回 allow。',
+  '语气叹词（卧槽/特么/妈的/泥马/卧槽类）不带攻击对象时返回 allow，或低置信度 review，不直接 block。',
+  "示例：「你就是个莎碧」→ block/abuse；「你nmsl吧」→ block/abuse；「你尼玛有病吧，谁让你动的代码」→ block/abuse（带攻击对象的谐音辱骂）；「泥马，服务器又崩了」→ review（叹词，低置信）；「usb3.0接口认不出来」→ allow/safe；「卧槽这波优化真的牛」→ allow/safe。",
 ].join('\n');
 
 let config = {
@@ -23,7 +28,7 @@ let config = {
   recallEnabled: false,
   groupOnly: true,
   notifyAdmin: false,
-  engine: 'codex',
+  engine: 'ma',
   rulesPrefilter: true,
   confidenceThreshold: 0.9,
   timeoutMs: 15000,
@@ -35,7 +40,7 @@ let config = {
   exemptOpenIds: [],
   auditFile: DEFAULT_AUDIT_FILE,
   cwd: PROJECT_ROOT,
-  model: process.env.CODEX_MODEL || '',
+  model: '',
   policy: DEFAULT_POLICY,
 };
 
@@ -70,37 +75,29 @@ function resolveAuditFile(value) {
   return resolveFromProject(value) || DEFAULT_AUDIT_FILE;
 }
 
-let createdModerationCwd = '';
-process.on('exit', () => {
-  try { if (createdModerationCwd) rmSync(createdModerationCwd, { recursive: true, force: true }); } catch {}
-});
-// 工作目录位于系统临时目录，可能被磁盘清理等外部因素删除 → spawn 前检测，丢了就重建（否则 spawn ENOENT、审核降级放行）
-function ensureModerationCwd(log = () => {}) {
-  if (process.env.MODERATION_CODEX_CWD) {
-    try { mkdirSync(config.cwd, { recursive: true }); } catch {}
-    return config.cwd;
-  }
-  if (createdModerationCwd && existsSync(createdModerationCwd)) return createdModerationCwd;
-  createdModerationCwd = mkdtempSync(join(tmpdir(), 'feishu-moderation-'));
-  log('warn', 'moderation', `工作目录被系统清理，已重建: ${createdModerationCwd}`);
-  return createdModerationCwd;
-}
-function createModerationCwd() {
-  if (process.env.MODERATION_CODEX_CWD) return resolveFromProject(process.env.MODERATION_CODEX_CWD);
-  createdModerationCwd = mkdtempSync(join(tmpdir(), 'feishu-moderation-'));
-  return createdModerationCwd;
+// policy 来源优先级：MODERATION_POLICY 环境变量（紧急覆盖）> config/moderation.json（入 git，常规调整）> 代码默认值。
+// 返回 { policy, source }，source 用于启动日志留痕，避免「配置漂移排查被误导」。
+function resolvePolicy() {
+  const envPolicy = (process.env.MODERATION_POLICY || '').trim();
+  if (envPolicy) return { policy: envPolicy, source: 'env' };
+  try {
+    const filePolicy = String(JSON.parse(readFileSync(MODERATION_POLICY_FILE, 'utf-8'))?.policy || '').trim();
+    if (filePolicy) return { policy: filePolicy, source: 'config/moderation.json' };
+  } catch {}
+  return { policy: DEFAULT_POLICY, source: 'built-in' };
 }
 
 export function initModeration(log = () => {}) {
   const keywords = splitList(process.env.MODERATION_KEYWORDS, ',');
   const regexSources = splitList(process.env.MODERATION_REGEXES, ';');
   const regexes = [];
-  let engine = (process.env.MODERATION_ENGINE || 'codex').trim().toLowerCase();
+  let engine = (process.env.MODERATION_ENGINE || 'ma').trim().toLowerCase();
 
-  if (!['codex', 'rules'].includes(engine)) {
+  if (!['ma', 'rules'].includes(engine)) {
     log('error', 'moderation', `unknown engine ${engine}; fallback to rules`);
     engine = 'rules';
   }
+  if (engine === 'ma') initMa(log); // 提前暴露配置缺失（key/environmentId），并启动会话清扫器
 
   for (const source of regexSources) {
     try {
@@ -131,13 +128,12 @@ export function initModeration(log = () => {}) {
     regexes,
     exemptOpenIds: splitList(process.env.MODERATION_EXEMPT_OPEN_IDS, ','),
     auditFile: resolveAuditFile(process.env.MODERATION_AUDIT_FILE),
-    cwd: createModerationCwd(),
-    model: process.env.MODERATION_CODEX_MODEL || process.env.CODEX_MODEL || '',
-    policy: process.env.MODERATION_POLICY || DEFAULT_POLICY,
+    model: process.env.MODERATION_MODEL || getMaConfig().model?.id || '',
+    ...resolvePolicy(),
   };
 
   const mode = !config.enabled ? 'disabled' : config.recallEnabled ? 'recall' : 'dry-run';
-  log('info', 'moderation', `initialized mode=${mode} engine=${engine} rules=${keywords.length + regexes.length} threshold=${config.confidenceThreshold} warn=${config.warnThreshold}`);
+  log('info', 'moderation', `initialized mode=${mode} engine=${engine} rules=${keywords.length + regexes.length} threshold=${config.confidenceThreshold} warn=${config.warnThreshold} policy=${config.source}(${config.policy.length}字)`);
   if (config.enabled && engine === 'rules' && keywords.length === 0 && regexes.length === 0) {
     log('warn', 'moderation', 'rules engine enabled but no rules configured');
   }
@@ -158,6 +154,8 @@ export function getModerationStatus() {
     queueLimit: config.queueLimit,
     rulesPrefilter: config.rulesPrefilter,
     model: config.model || 'configured-default',
+    policySource: config.source,
+    policyLength: config.policy.length,
     keywordCount: config.keywords.length,
     regexCount: config.regexes.length,
     exemptOpenIdCount: config.exemptOpenIds.length,
@@ -263,30 +261,23 @@ async function withClassificationSlot(fn) {
   }
 }
 
-async function classifyWithCodex(text, log) {
+async function classifyWithMA(text, log) {
   const result = await withClassificationSlot(async () => {
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), config.timeoutMs);
     let output = '';
 
     try {
-      for await (const event of runCodexQuery({
-        prompt: buildModerationPrompt(text),
-        cwd: ensureModerationCwd(log),
-        abortController,
-        model: config.model,
-        sandboxMode: 'read-only',
-        ephemeral: true,
-        ignoreRules: true,
-        outputSchema: MODERATION_SCHEMA_FILE,
-        log,
-      })) {
-        if (event.type === 'assistant') {
-          output = event.message?.content?.[0]?.text || output;
-        } else if (event.type === 'result') {
-          output = event.result || output;
-        }
-      }
+      output = await maJudge(buildModerationPrompt(text), {
+        timeoutMs: config.timeoutMs,
+        signal: abortController.signal,
+        // JSON 修复重试：首轮解析不出合法分类结果时，ma.js 会在同一 ephemeral 会话内追问一次。
+        // 注意 parseClassification 失败时是抛异常而非返回 null——这里必须吞掉异常只回布尔值，
+        // 否则异常会穿透 judge 的校验分支直接进 catch，重试路径永远不会触发。
+        validate: (raw) => {
+          try { parseClassification(raw); return true; } catch { return false; }
+        },
+      });
     } finally {
       clearTimeout(timer);
     }
@@ -313,7 +304,7 @@ async function classifyMessage(text, log) {
     return { decision: 'block', confidence: 1, category: ruleMatch.type };
   }
 
-  return classifyWithCodex(text, log);
+  return classifyWithMA(text, log);
 }
 
 async function appendAudit(record, log) {
@@ -385,10 +376,10 @@ export async function moderateMessage({
     (classification.decision === 'block' || classification.decision === 'review') &&
     classification.confidence >= config.warnThreshold;
 
-  // Safe classifier output needs no audit record.
-  if (!shouldRecall && !shouldWarn && classification.decision !== 'review' && !classifierError && !classification.degraded) {
-    return false;
-  }
+  // Safe classifier output: 采样落盘（约 10%）而非全量丢弃——allow 判定的消息文本是后续挖掘
+  // 漏检（false negative）样本的唯一来源；全量落盘会把审计文件撑爆，采样兼顾体积与可挖掘性。
+  const isCleanAllow = !shouldRecall && !shouldWarn && classification.decision !== 'review' && !classifierError && !classification.degraded;
+  if (isCleanAllow && Math.random() >= 0.1) return false;
 
   let action;
   let recallError = '';
@@ -410,6 +401,8 @@ export async function moderateMessage({
     action = 'review';
   } else if (classification.degraded) {
     action = 'degraded';
+  } else if (isCleanAllow) {
+    action = 'allow-sampled';
   } else {
     action = 'dry-run';
   }
@@ -426,6 +419,7 @@ export async function moderateMessage({
     decision: classification.decision,
     confidence: classification.confidence,
     category: classification.category,
+    text: String(text || '').slice(0, 200),
     action,
     error,
   }, log);

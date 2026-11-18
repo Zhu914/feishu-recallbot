@@ -501,6 +501,60 @@ export async function downloadMessageFile(messageId, fileKey, fileName, saveDir,
   return savePath;
 }
 
+/**
+ * 下载消息资源到内存 Buffer（不落盘）。fileType: 'image'（图片/富文本内嵌图）或 'file'。
+ * 二维码检测等只需要字节的场景用这个；maxBytes 超限时中断下载并抛错，防异常大图占内存。
+ * timeoutMs 给整个下载阶段（建连 GET + 流式读取）钉硬上限：SDK/axios 无默认超时，
+ * 悬死请求会冻结调用方的串行消息队列，超时在这里直接判负（调用方按跳过处理）。
+ * 注：getReadableStream() 只能消费一次，与 writeFile 二选一。
+ */
+export function downloadMessageResourceBuffer(messageId, fileKey, fileType = 'image', maxBytes = 10 * 1024 * 1024, timeoutMs = 10000) {
+  if (!messageId?.startsWith('om_')) return Promise.reject(new Error('invalid message_id'));
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stream = null;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(arg);
+    };
+    const timer = setTimeout(() => {
+      const err = new Error(`resource download timed out after ${timeoutMs}ms`);
+      if (stream) stream.destroy(err); // for-await 以该错误 reject → 走下方 catch
+      else settle(reject, err);        // GET 阶段悬死：直接判负（底层连接由 SDK/axios 自行回收）
+    }, timeoutMs);
+
+    (async () => {
+      try {
+        const resp = await getClient().im.messageResource.get({
+          path: { message_id: messageId, file_key: fileKey },
+          params: { type: fileType },
+        });
+        stream = resp?.getReadableStream ? resp.getReadableStream() : null;
+        if (!stream) throw new Error('download response has no readable stream');
+        // GET 阶段已超时判负：迟到返回的流立即销毁，不让它后台无限排水占住 socket/内存
+        if (settled) { stream.destroy?.(); return; }
+
+        const chunks = [];
+        let total = 0;
+        for await (const chunk of stream) {
+          total += chunk.length;
+          if (total > maxBytes) {
+            stream.destroy?.();
+            throw new Error(`resource exceeds maxBytes ${maxBytes}`);
+          }
+          chunks.push(chunk);
+        }
+        settle(resolve, Buffer.concat(chunks));
+      } catch (err) {
+        settle(reject, err);
+      }
+    })();
+  });
+}
+
 // 文件扩展名 → 飞书 im file_type（飞书无 html 枚举，一律用 stream 兜底）
 const FILE_TYPE_MAP = {
   pdf: 'pdf',

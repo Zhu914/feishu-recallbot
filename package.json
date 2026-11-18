@@ -1,17 +1,22 @@
 {
   "name": "feishu-bot-framework",
-  "version": "0.1.0",
-  "description": "Reusable Feishu WebSocket bot framework with Codex session support",
+  "version": "0.2.0",
+  "description": "Feishu WebSocket moderation bot with Managed Agents classification and canned replies",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "check": "node --check src/index.js && node --check src/feishu.js && node --check src/scheduler.js && node --check src/moderation.js && node --check src/ad-recall.js && node --check src/codex.js"
+    "check": "node --check src/index.js && node --check src/feishu.js && node --check src/moderation.js && node --check src/ad-recall.js && node --check src/ma.js && node --check src/qrcode.js && node --check src/qrcode-worker.js"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.63.0",
-    "@openai/codex": "^0.156.1",
+    "@undecaf/zbar-wasm": "^0.11.0",
     "dotenv": "^16.4.0",
-    "node-cron": "^4.2.1"
+    "jpeg-js": "^0.4.4",
+    "jsqr": "^1.4.0",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "qrcode": "^1.5.4"
   }
 }

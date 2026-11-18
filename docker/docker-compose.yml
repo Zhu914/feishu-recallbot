@@ -8,16 +8,14 @@ services:
     env_file:
       - ../.env
     environment:
-      DEFAULT_CWD: /app
       DATA_DIR: /data
       CONTACTS_FILE: /data/contacts.md
-      TASKS_FILE: /data/tasks.json
-      CODEX_HOME: /data/codex-home
     volumes:
       - app-outputs:/app/outputs
       - app-logs:/app/logs
       - bot-home:/root/.feishu-bot
       - bot-data:/data
+      - ../.secrets/zhipu.key:/run/secrets/zhipu_key:ro
     restart: unless-stopped
 
 volumes:

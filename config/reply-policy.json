@@ -1,4 +1,4 @@
 {
   "groupRequireMention": true,
-  "groupSessionFollowUp": true
+  "cannedReply": "收到～ 我是本群管理机器人，负责内容审核与秩序维护；有问题请 @管理员 或联系 bot 管理员。"
 }
