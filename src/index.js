@@ -563,7 +563,6 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
         // createTime 必须传归一化后的毫秒时间戳：飞书事件 create_time 是秒级，
         // 秒级值进了滑动窗口会把「5 分钟去重窗」拉长成 ~83 小时（misfire duplicate_burst）
         createTime: msgCreateTime,
-        isReply: !!msg.parent_id, // 引用/回复某条消息 → 白名单
         rawContent: rawMsg?.content || '',
         rootId: rootId || '',
         msgType, // 图片二维码检测（qrImage）需要知道消息类型以提取图片资源
