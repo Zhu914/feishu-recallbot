@@ -553,17 +553,16 @@ function looksLikeSolitaire(text, rawContent) {
  * @param {string} input.senderId    发送者 open_id
  * @param {string} input.chatId      群 chat_id
  * @param {number} input.createTime  消息创建时间（ms）
- * @param {boolean} input.isReply    是否引用/回复某条消息
  * @param {string} [input.rawContent] 原始消息 content JSON（用于提取 post 富文本里的链接 href）
  * @returns {Promise<{level: 'strong_ad'|'weak_ad'|'normal', reason: string, detail?: string}>}
  */
-export async function classifyMessage({ text, senderId, chatId, createTime, isReply, rawContent = '' }) {
+export async function classifyMessage({ text, senderId, chatId, createTime, rawContent = '' }) {
   const raw = String(text || '');
 
-  // 白名单（优先于一切强特征）
-  if (isReply) return { level: 'normal', reason: 'whitelist: 引用回复' };
+  // 注意：引用回复/话题内回复不再豁免（2026-11-20），与主消息走同一套规则，
+  // 计数（重复/刷屏/踢出）按发送者归属，与话题归属者无关。
 
-  // 强特征 0：接龙（要求“禁止任何人”，置于管理员白名单之前，仅保留引用回复豁免）
+  // 强特征 0：接龙（要求“禁止任何人”，置于管理员白名单之前）
   if (looksLikeSolitaire(raw, rawContent)) {
     return { level: 'strong_ad', reason: 'solitaire' };
   }
@@ -759,7 +758,7 @@ function cardReasonLabel(reason) {
 // ---------- 图像二维码检测（qrImage） ----------
 // 只判定「消息里的图片是否存在二维码」，不解码内容、不做语义判断：命中即按 strong_ad/qr_code
 // 走与文本广告特征完全相同的撤回链路（安全刹车、权限预检、警示卡片、踢出计数全复用）。
-// 白名单（引用回复 / bot 管理员 / 群主 / 群管理员 / 群信息不可用保守豁免）在进入本函数前已过滤。
+// 白名单（bot 管理员 / 群主 / 群管理员 / 群信息不可用保守豁免）在进入本函数前已过滤。
 // 已知不覆盖：表情包（飞书 API 不支持下载表情包资源）、GIF/WebP（解码器只支持 PNG/JPEG，
 // 未支持格式在日志中留痕 skipped=…，后续可按占比决定是否补 WebP 解码）。
 async function detectQrInMessage({ messageId, msgType, rawContent }) {
@@ -797,19 +796,19 @@ async function detectQrInMessage({ messageId, msgType, rawContent }) {
  *   warned=true   已在话题内发出提醒卡片（weak_ad；调用方可据此跳过 AI 审核的重复提醒）
  */
 export async function handleAdMessage({
-  text, messageId, chatId, chatType, senderOpenId, senderName = '', createTime, isReply, rawContent = '', rootId = '', msgType = '',
+  text, messageId, chatId, chatType, senderOpenId, senderName = '', createTime, rawContent = '', rootId = '', msgType = '',
 }) {
   if (!isAdRecallCandidate({ chatType, senderType: 'user', chatId })) return { blocked: false, warned: false };
 
   let verdict;
   try {
-    verdict = await classifyMessage({ text, senderId: senderOpenId, chatId, createTime, isReply, rawContent });
+    verdict = await classifyMessage({ text, senderId: senderOpenId, chatId, createTime, rawContent });
   } catch (err) {
     ctx.log('error', 'ad-recall', `classify failed msg=${messageId?.slice(-8)}: ${err.message?.slice(0, 200)}`);
     return { blocked: false, warned: false };
   }
 
-  // 图像二维码强特征：文本未触发撤回、且不在任何白名单（引用回复/管理员等，reason 以 whitelist: 前缀
+  // 图像二维码强特征：文本未触发撤回、且不在任何白名单（管理员等，reason 以 whitelist: 前缀
   // 返回）时，对消息内图片（独立 image 或 post 内嵌图）做本地二维码检测；命中升级为 strong_ad 撤回。
   // weak_ad（营销词新人提醒）也可被升级：图片里真有二维码时提醒应让位于撤回。
   if (
